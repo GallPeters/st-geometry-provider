@@ -1,4 +1,4 @@
-"""Build releases/STGeometryProvider-<version>.zip (QGIS > Plugins > Install from ZIP).
+"""Build releases/st_geometry_provider-<version>.zip (QGIS > Plugins > Install from ZIP).
 
 Usage:  python tools/build_release.py [path/to/connections.json]
 
@@ -13,7 +13,8 @@ import sys
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PACKAGE = "STGeometryProvider"
+PACKAGE = "STGeometryProvider"        # plugin folder inside the zip
+ZIP_NAME = "st_geometry_provider"     # release file name
 FILES = ["__init__.py", "metadata.txt", "LICENSE", "icon.png", "icon.svg", "README.md",
          "connections.example.json"]
 DIRS = ["src"]
@@ -28,7 +29,7 @@ def version():
 def main():
     out_dir = os.path.join(ROOT, "releases")
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, "%s-%s.zip" % (PACKAGE, version()))
+    out = os.path.join(out_dir, "%s-%s.zip" % (ZIP_NAME, version()))
     extra = sys.argv[1] if len(sys.argv) > 1 else None
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for f in FILES:
