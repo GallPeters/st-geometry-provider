@@ -1,0 +1,16 @@
+# credentials / site configuration - never commit
+connections.json
+st_geometry_connections.json
+
+# python / editors / OS
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# build artifacts (release zips in releases/ ARE versioned)
+*.zip
+!releases/*.zip
+dist/

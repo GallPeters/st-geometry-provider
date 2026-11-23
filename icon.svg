@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- database cylinder -->
+  <ellipse cx="64" cy="26" rx="44" ry="14" fill="#c0392b"/>
+  <path d="M20 26 v62 a44 14 0 0 0 88 0 v-62 a44 14 0 0 1 -88 0 z" fill="#e74c3c"/>
+  <path d="M20 57 a44 14 0 0 0 88 0" fill="none" stroke="#c0392b" stroke-width="4"/>
+  <ellipse cx="64" cy="26" rx="44" ry="14" fill="none" stroke="#962d22" stroke-width="3"/>
+  <!-- polygon with a hole and an arc edge -->
+  <path d="M44 74 L86 66 L98 92 Q80 116 52 108 Z M58 84 L74 81 L78 94 L62 97 Z"
+        fill="#2ecc71" fill-rule="evenodd" stroke="#1e8449" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="44" cy="74" r="4" fill="#ffffff" stroke="#1e8449" stroke-width="2"/>
+  <circle cx="86" cy="66" r="4" fill="#ffffff" stroke="#1e8449" stroke-width="2"/>
+  <circle cx="98" cy="92" r="4" fill="#ffffff" stroke="#1e8449" stroke-width="2"/>
+  <circle cx="52" cy="108" r="4" fill="#ffffff" stroke="#1e8449" stroke-width="2"/>
+</svg>

@@ -1,0 +1,14 @@
+{
+  "_comment": "Copy this file to connections.json (same folder) and fill it in. Every entry appears in the plugin's connection list. Leave username/password empty to be asked once per QGIS session. Use either host+port+service_name, or dsn (TNS alias / full descriptor). schemas (optional) limits the table list to these owners.",
+  "connections": [
+    {
+      "name": "GIS production",
+      "host": "db-server.example.local",
+      "port": 1521,
+      "service_name": "ORCL",
+      "username": "gis_reader",
+      "password": "",
+      "schemas": ["GIS_OWNER"]
+    }
+  ]
+}
