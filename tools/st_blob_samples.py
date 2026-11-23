@@ -26,7 +26,7 @@ SAMPLES = [
 ]
 
 from qgis.core import QgsDataSourceUri
-from STGeometryProvider.src import backend as B      # installed plugin package
+from st_geometry_provider.src import backend as B     # installed plugin package
 
 
 def hexgroups(h):

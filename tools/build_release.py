@@ -2,7 +2,7 @@
 
 Usage:  python tools/build_release.py [path/to/connections.json]
 
-The version is read from metadata.txt. The zip contains the plugin folder STGeometryProvider/
+The version is read from metadata.txt. The zip contains the plugin folder st_geometry_provider/
 with the plugin files only (no tests, docs sources, tools or releases). An optional
 connections.json is bundled for distribution inside your own network; it is never part of
 the repository.
@@ -13,7 +13,7 @@ import sys
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PACKAGE = "STGeometryProvider"        # plugin folder inside the zip
+PACKAGE = "st_geometry_provider"      # plugin folder inside the zip
 ZIP_NAME = "st_geometry_provider"     # release file name
 FILES = ["__init__.py", "metadata.txt", "LICENSE", "icon.png", "icon.svg", "README.md",
          "connections.example.json"]
