@@ -1,6 +1,6 @@
 # ST Geometry Provider for QGIS: what it does and how it works
 
-Version 1.3 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
+Version 1.4 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
 
 ---
 
@@ -287,7 +287,7 @@ It then picks one of three plans:
 | Situation | Plan |
 |---|---|
 | View contains the whole data extent | no spatial condition at all |
-| Estimated rows > 250,000 | plain scan with envelope conditions (`minx <= :x2 AND maxx >= :x1 …`) |
+| Estimated rows > threshold (Auto: 10 % of the table, at least 50,000) | plain scan with envelope conditions (`minx <= :x2 AND maxx >= :x1 …`) |
 | Otherwise | ST grid index (`sde.st_envintersects`) |
 
 For this to work the plugin needs the **exact data extent**. `SDE.LAYERS` can hold a much larger extent than the data (yours did). When a layer is added, the dialog option *"Compute exact data extent"* runs a one-time scan (`MIN/MAX` of the envelope columns) and stores the result in the layer source (`stext=`). From then on, *Zoom to layer* is exact too.
@@ -479,7 +479,7 @@ All defaults are chosen for the fastest loading and drawing. The dialog's **Fast
 | Driver | Auto (python-oracledb) | Bulk fetch with inline LOBs |
 | Geometry decoding | Local decoder where verified | No per-row conversion on the server |
 | Parallel sessions per layer | **4** | Large reads split into view strips (index plan) or OBJECTID ranges (scan). Use *Tune on current map view* to find the best value for your database. |
-| Use plain scan above | 50,000 estimated rows | Index for small views, scan for huge ones |
+| Use plain scan above | **Auto**: 10 % of the table, at least 50,000 rows | Measured break-even: the ST index costs ~70 µs per row in view, a full envelope scan ~7 µs per table row. A fixed number can't fit both small and large tables. |
 | Fast overview | **On**, 1 px | No geometry fetched for sub-pixel features (map drawing only) |
 | Arcs (true curves) | Off | Curves cost extra parsing and drawing |
 | Force 2D | **Ticked** | Smaller geometries; the decoder needs no Z verification |

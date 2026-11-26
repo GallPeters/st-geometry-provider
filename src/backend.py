@@ -14,6 +14,7 @@ Bind variables use Oracle named style (:name) in both backends.
 
 import os
 import queue
+import re
 import sys
 import threading
 import uuid
@@ -64,19 +65,34 @@ def set_backend_pref(value):
 
 
 # fastest configuration (also the defaults) - see reset_fast_defaults()
-FAST = {"backend": "auto", "parallel": 4, "index_max_rows": 50000, "decoder": "auto",
+FAST = {"backend": "auto", "parallel": 4, "index_max_rows": 0, "decoder": "auto",
         "overview": True, "overview_px": 1.0, "curves": "off", "timing": False}
 
 SETTINGS_TIMING = "stgeometry/timing"
 _timing = None
 
 
+AUTO_SCAN_SHARE = 0.10          # auto: plain scan when the view holds > 10 % of the table ...
+AUTO_SCAN_MIN = 50000           # ... and at least this many rows
+
+
 def index_max_rows():
-    """Above this estimated number of rows in view, use a plain scan instead of the ST grid index."""
+    """Above this estimated number of rows in view, use a plain scan instead of the ST grid index.
+    0 = automatic (see scan_threshold)."""
     try:
-        return max(1000, int(QgsSettings().value("stgeometry/index_max_rows", 50000)))
+        v = int(float(QgsSettings().value("stgeometry/index_max_rows", 0)))
     except Exception:
-        return 50000
+        v = 0
+    return 0 if v <= 0 else max(1000, v)
+
+
+def scan_threshold(setting, table_rows):
+    """Rows in view above which the plain scan is cheaper than the ST index.
+    Measured: ST index ~70 us per returned row, full envelope scan ~7 us per TABLE row,
+    so the break-even is ~10 % of the table; never below AUTO_SCAN_MIN."""
+    if setting and setting > 0:
+        return setting
+    return max(AUTO_SCAN_MIN, int(AUTO_SCAN_SHARE * (table_rows or 0)))
 
 
 def overview_enabled():
@@ -154,7 +170,8 @@ def set_decoder_pref(v):
 
 
 def set_index_max_rows(n):
-    QgsSettings().setValue("stgeometry/index_max_rows", max(1000, int(n)))
+    n = int(n)
+    QgsSettings().setValue("stgeometry/index_max_rows", 0 if n <= 0 else max(1000, n))
 
 
 # ----------------------------------------------------------------- config file
@@ -499,7 +516,7 @@ class _OraConn(_ConnBase):
         conn.outputtypehandler = _make_output_type_handler()
 
     def query(self, sql, params=None, arraysize=ARRAYSIZE):
-        return _OraRows(self.conn, sql, params, arraysize)
+        return _OraRows(self.conn, sql, used_binds(sql, params), arraysize)
 
     def close(self):
         c, self.conn = self.conn, None
@@ -521,6 +538,20 @@ class _OraConn(_ConnBase):
             self.close()
         except Exception:
             pass
+
+
+_BIND_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def used_binds(sql, params):
+    """Only the bind values whose placeholder appears in the statement: python-oracledb rejects
+    any extra name (DPY-4008), e.g. a view coordinate that a parallel strip query does not use."""
+    if not params:
+        return params
+    names = set(_BIND_RE.findall(sql))
+    if len(names) >= len(params) and all(k in names for k in params):
+        return params
+    return {k: v for k, v in params.items() if k in names}
 
 
 _DONE = object()
@@ -777,7 +808,7 @@ class _QConn(_ConnBase):
         self.db = db
 
     def query(self, sql, params=None, arraysize=ARRAYSIZE):
-        return _QRows(self.db, sql, params)
+        return _QRows(self.db, sql, used_binds(sql, params))
 
     def close(self):
         db, self.db = getattr(self, "db", None), None

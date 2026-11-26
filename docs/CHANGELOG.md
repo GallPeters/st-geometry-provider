@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4
+
+- **Fix: parallel sessions on zoomed-in views.** With *Parallel sessions per layer* above 1, zoomed-in views (spatial index plan) showed no features. Each parallel strip query was sent with a view coordinate it didn't use, and python-oracledb rejects unused bind values (DPY-4008). The database layer now sends only the bind values that appear in each statement.
+- **Automatic scan threshold (new default).** *Use plain scan above* = **Auto**: the plain scan is used when the view holds more than 10 % of the table (at least 50,000 rows), the measured break-even between the ST index (~70 µs per row in view) and a full envelope scan (~7 µs per table row). A fixed number can still be entered. *Fastest settings* sets Auto.
+- **Tests:**
+  - new `test_parallel.py` (63 checks: parallel 1/2/3/4/8/16 × index strips, horizontal strips, data edge, full extent, plain scan, expression and layer filters, real zoomed-in renders);
+  - `test_tune.py` extended (fresh profile, corrupt saved settings, no python-oracledb, no numpy);
+  - the simulated database now rejects unused bind values like Oracle does.
+
 ## 1.3
 
 - **Parallel sessions no longer repeat index work.** With the ST spatial index, the view is cut into strips: each session searches only its own strip, and each feature belongs to exactly one strip. Previously, `MOD(OBJECTID, N)` repeated the full index search in every session.

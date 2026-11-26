@@ -136,7 +136,11 @@ def _flt(sql, name):
 class FakeConn(B._ConnBase):
     def query(self, sql, params=None, arraysize=1000):
         SQL_LOG.append(sql)
+        params = B.used_binds(sql, params)              # same filtering as the real connections
         p = params or {}
+        extra = set(p) - set(re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", sql))
+        if extra:                                       # python-oracledb raises DPY-4008 for these
+            raise RuntimeError("DPY-4008: no bind placeholder named %s" % sorted(extra))
         s = " ".join(sql.split())
         u = s.upper()
         if "FROM ALL_TAB_COLUMNS" in u and "DATA_TYPE = 'ST_GEOMETRY'" not in u and "DATA_TYPE='ST_GEOMETRY'" not in u:
@@ -271,6 +275,9 @@ class FakeConn(B._ConnBase):
         m = re.search(r'"HEIGHT" > :(q\d+)', s)
         if m:
             rows = [r for r in rows if r["height"] > p[m.group(1)]]
+        m = re.search(r'"HEIGHT" > ([0-9.]+)', s)            # literal layer filter (subset string)
+        if m:
+            rows = [r for r in rows if r["height"] > float(m.group(1))]
         return rows
 
     def close(self):

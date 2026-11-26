@@ -127,11 +127,13 @@ class AddLayerDialog(QDialog):
         self.chk_ext.setChecked(True)
         grid.addWidget(self.chk_ext, 3, 0, 1, 4)
         self.idx_max = QSpinBox()
-        self.idx_max.setRange(1000, 10000000)
+        self.idx_max.setRange(0, 10000000)
         self.idx_max.setSingleStep(10000)
+        self.idx_max.setSpecialValueText("Auto (10 % of table, min 50,000)")
         self.idx_max.setValue(B.index_max_rows())
         self.idx_max.setToolTip("Estimated rows in view above which a plain table scan is used instead of the "
-                                "ST spatial index. Lower = scan sooner. Applies to all layers from the next redraw.")
+                                "ST spatial index. Auto (0) = when the view holds more than 10 % of the table "
+                                "(at least 50,000 rows), the measured break-even point. Applies from the next redraw.")
         grid.addWidget(QLabel("Use plain scan above (est. rows in view):"), 4, 0)
         grid.addWidget(self.idx_max, 4, 1)
         self.dec_combo = QComboBox()

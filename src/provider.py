@@ -29,7 +29,7 @@ from qgis.core import (QgsPointXY, QgsVertexId, QgsVectorDataProvider, QgsDataPr
 from qgis.PyQt.QtCore import QDateTime, QDate, QTime, QByteArray
 
 from . import compat as C
-from .backend import get_backend, parallel_degree, ParallelRows, timing_enabled, index_max_rows
+from .backend import get_backend, parallel_degree, ParallelRows, timing_enabled, index_max_rows, scan_threshold
 from time import perf_counter
 from itertools import islice
 
@@ -400,8 +400,9 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                 frac = 0.0 if inter.isNull() else (inter.width() * inter.height()) / (ext.width() * ext.height())
                 if s.num_rows:
                     est = frac * s.num_rows
-                    use_index = est <= s.index_max_rows
-                    self._plan_info += " view=%.3f est=%d" % (frac, int(est))
+                    thr = scan_threshold(s.index_max_rows, s.num_rows)
+                    use_index = est <= thr
+                    self._plan_info += " view=%.3f est=%d scan_above=%d" % (frac, int(est), thr)
                 else:  # no row count: decide by area share of the data extent
                     use_index = frac <= 0.25
                     self._plan_info += " view=%.3f" % frac
