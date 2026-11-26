@@ -6,6 +6,7 @@ These tests run **headless inside a real QGIS** (no GUI). Oracle is simulated: a
 |---|---|
 | `test_integration.py` | Loading, the stored layer settings, local decoder vs Esri WKB, holes, multipart polygons, island-in-hole, attributes, attribute-only reads, expression push-down, identify, fid filters, subset string, real map rendering, fast overview mode (activation, pixel setting, exactness outside rendering), index vs scan plan, parallel sessions, Force 2D |
 | `test_curves.py` | True curves from extended shape buffers: arc encodings (center and interior point), arcs on holes, the off / true-curve / segmentize modes, segmentation by angle and by distance, rendering |
+| `test_geometry_as.py` | Polygons loaded as lines (rings, holes, perimeter, identify) and as points (all inside, L-shapes moved inside, true centroid for convex shapes, Z, Force 2D), rendering with and without fast overview |
 | `test_batch_decoder.py` | numpy batch decoder vs per-row decoder on random data: 2D/3D, all Z layouts, points, lines, polygons, truncated rows. Must report 0 mismatches. |
 
 ## Running (Windows, OSGeo4W)

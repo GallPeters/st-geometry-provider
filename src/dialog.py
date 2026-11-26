@@ -102,6 +102,15 @@ class AddLayerDialog(QDialog):
         grid.addWidget(self.chk_evw, 0, 1, 1, 3)
         grid.addWidget(QLabel("Geometry type:"), 1, 0)
         grid.addWidget(self.gtype, 1, 1)
+        self.geom_as = QComboBox()
+        for v, t in (("", "Polygons (as stored)"), ("boundary", "Lines - polygon boundaries"),
+                     ("point", "Points - centroid, kept inside the polygon")):
+            self.geom_as.addItem(t, v)
+        self.geom_as.setToolTip("For polygon tables: load the boundaries (all rings, holes included) as lines, "
+                                "or one point per feature (centroid; if it falls outside the polygon, a point "
+                                "on the surface is used). The same table can be added several times.")
+        grid.addWidget(QLabel("Load polygons as:"), 7, 0)
+        grid.addWidget(self.geom_as, 7, 1)
         grid.addWidget(QLabel("Driver:"), 1, 2)
         grid.addWidget(self.backend_combo, 1, 3)
         self.parallel = QSpinBox()
@@ -290,10 +299,16 @@ class AddLayerDialog(QDialog):
             u.setParam("stgeomtype", gt)
         if self.chk_ext.isChecked():
             u.setParam("stcalcext", "1")
+        ga = self.geom_as.currentData()
+        if ga:
+            u.setParam("stgeomas", ga)
         return u.uri(False)
 
     def _make_layer(self, it):
         name = it.text(1)
+        ga = self.geom_as.currentData()
+        if ga:
+            name += " (lines)" if ga == "boundary" else " (points)"
         layer = QgsVectorLayer(self._layer_uri(it), name, PROVIDER_KEY)
         if layer.isValid():
             # re-create the layer from the provider's completed source (key, type, CRS, exact extent)

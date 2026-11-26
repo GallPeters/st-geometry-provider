@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1
+
+- **Load polygons as lines or points.** In the add-layer dialog, *Load polygons as*:
+  - **Lines:** the polygon boundaries; every ring (holes included) becomes a line.
+  - **Points:** one point per feature, the centroid. If the centroid falls outside the polygon (U/L shapes, multipart), QGIS's *point on surface* is used instead, so the point is always inside.
+
+  The same table can be added several times in different modes. Identify, selection, filters and fast overview work on the converted geometry, and the mode is stored in the layer source.
+
 ## 1.0 — first public release
 
 A read-only QGIS data provider (`stgeometry`) for Oracle tables that store geometry in Esri `SDE.ST_GEOMETRY`.

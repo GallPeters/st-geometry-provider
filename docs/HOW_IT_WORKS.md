@@ -1,6 +1,6 @@
 # ST Geometry Provider for QGIS: what it does and how it works
 
-Version 1.0 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
+Version 1.1 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
 
 ---
 
@@ -449,3 +449,20 @@ Profiled with cProfile on 20,000 features inside QGIS 4.2.3. Each change was che
 | numpy missing | Automatically falls back to per-feature decoding |
 
 **Result:** the plugin's own cost per feature with geometry is about **12 µs** (about 35% less than per-feature decoding). All test suites pass: 36/36 functional and 14/14 true-curve tests.
+
+
+---
+
+## 19. Loading polygons as lines or points
+
+Add-layer dialog → **Load polygons as** (polygon tables only):
+
+| Mode | Geometry per feature | Layer type |
+|---|---|---|
+| Polygons (default) | as stored | MultiPolygon(Z) |
+| **Lines** | the polygon's boundary: every ring (outer rings and holes) becomes a line | MultiLineString(Z) (MultiCurve with true curves) |
+| **Points** | the **centroid**. If the centroid falls outside the polygon (U/L shapes, multipart features), QGIS's *point on surface* is used, a point guaranteed to lie inside. Z is taken from the polygon. | Point(Z) |
+
+- **Per layer, not global.** The mode is stored in the layer source (`stgeomas='boundary'` or `'point'`), so the same table can be added several times, e.g. as polygons and as labelled points.
+- **Where it happens.** The conversion runs on your PC right after the geometry is decoded, so identify, selection and distance tools work on the lines or points. Spatial filtering still uses the polygon's envelope, which always contains its boundary and its interior point. In fast overview mode, merged pixel cells are drawn as points or short lines to match the layer type.
+- **Attributes and feature ids** are unchanged.

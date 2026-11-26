@@ -22,7 +22,7 @@ import decimal
 import time
 import traceback
 
-from qgis.core import (QgsPointXY, QgsVectorDataProvider, QgsDataProvider, QgsAbstractFeatureSource, QgsAbstractFeatureIterator,
+from qgis.core import (QgsPointXY, QgsVertexId, QgsVectorDataProvider, QgsDataProvider, QgsAbstractFeatureSource, QgsAbstractFeatureIterator,
                        QgsFeatureIterator, QgsFeatureRequest, QgsFields, QgsField, QgsGeometry,
                        QgsRectangle, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsCsException,
                        QgsDataSourceUri, QgsWkbTypes, QgsProviderMetadata, QgsProviderRegistry, QgsError)
@@ -161,9 +161,36 @@ def normalize_geometry(g, target, force2d):
         g.get().addZValue(0)
     if tm and not force2d and not QgsWkbTypes.hasM(t):
         g.get().addMValue(0)
-    if not QgsWkbTypes.isMultiType(g.wkbType()):
-        g.convertToMultiType()
+    if QgsWkbTypes.isMultiType(target):
+        if not QgsWkbTypes.isMultiType(g.wkbType()):
+            g.convertToMultiType()
+    elif QgsWkbTypes.isMultiType(g.wkbType()) and g.constGet().numGeometries() == 1:
+        g = QgsGeometry(g.constGet().geometryN(0).clone())
     return g
+
+
+def convert_polygon(g, mode):
+    """Polygon -> 'boundary' (all rings as lines) or 'point' (centroid, moved inside if needed)."""
+    if g is None or g.isNull():
+        return g
+    if mode == "boundary":
+        b = g.constGet().boundary()
+        return QgsGeometry(b) if b is not None else QgsGeometry()
+    if mode == "point":
+        c = g.centroid()
+        if c.isNull() or not g.intersects(c):       # outside (U/L shapes, multipart) -> point on surface
+            c = g.pointOnSurface()
+        if not c.isNull() and QgsWkbTypes.hasZ(g.wkbType()):
+            try:
+                z = g.constGet().vertexAt(QgsVertexId(0, 0, 0)).z()
+                c.get().addZValue(z if z == z else 0.0)
+            except Exception:
+                pass
+        return c
+    return g
+
+
+GEOM_AS = ("boundary", "point")
 
 
 class _Col(object):
@@ -206,6 +233,7 @@ class StFeatureSource(QgsAbstractFeatureSource):
         self.curve_mode = curves_mode()
         self.curve_hint = p._curve_hint
         self.keep_z = QgsWkbTypes.hasZ(p._wkb) and not p._force2d
+        self.geom_as = p._geom_as
         ttype, tval = curve_tolerance()
         TT = getattr(QgsAbstractGeometry, "SegmentationToleranceType", QgsAbstractGeometry)
         if ttype == "angle":
@@ -646,6 +674,8 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                         geom = s.dec.geometry(row[-5], row[-4], row[-3], row[-2])
                         if geom is None:          # not understood -> Esri converts this one row
                             geom = self._server_geom(fid)
+                    if s.geom_as and geom is not None:
+                        geom = convert_polygon(geom, s.geom_as)
                     if self._exact:
                         if geom is None or geom.isNull() or not self._engine.intersects(geom.constGet()):
                             continue
@@ -749,6 +779,7 @@ class StGeometryProvider(QgsVectorDataProvider):
         self._curve_ok = False
         self._curve_hint = None
         self._curve_cache = None
+        self._geom_as = ""
         try:
             t0 = time.time()
             self._load(uri)
@@ -918,6 +949,30 @@ class StGeometryProvider(QgsVectorDataProvider):
                 self._setup_curves(conn, base, geom, cadcols[0], u)
             if not (self._curve_ok and curves_mode() == "curves"):
                 self._wkb = QgsWkbTypes.linearType(self._wkb)
+
+            # ---- load polygons as lines (boundaries) or points (centroid inside)
+            self._geom_as = u.param("stgeomas") if u.hasParam("stgeomas") else ""
+            if self._geom_as not in GEOM_AS:
+                self._geom_as = ""
+            if self._geom_as:
+                cat = QgsWkbTypes.geometryType(self._wkb)
+                hz, hm = QgsWkbTypes.hasZ(self._wkb), QgsWkbTypes.hasM(self._wkb)
+                curved = QgsWkbTypes.isCurvedType(self._wkb)
+                if cat == C.GEOM_POLYGON:
+                    if self._geom_as == "boundary":
+                        t = QgsWkbTypes.parseType("MultiCurve" if curved else "MultiLineString")
+                    else:
+                        t = QgsWkbTypes.parseType("Point")
+                    if hz:
+                        t = QgsWkbTypes.addZ(t)
+                    if hm:
+                        t = QgsWkbTypes.addM(t)
+                    self._wkb = t
+                elif not ((self._geom_as == "boundary" and cat == C.GEOM_LINE)
+                          or (self._geom_as == "point" and cat == C.GEOM_POINT)):
+                    C.log("%s: 'load as %s' applies to polygon tables only - ignored" % (self._label, self._geom_as),
+                          "warning")
+                    self._geom_as = ""
                 if self._dec is not None:
                     DECODERS[self._label] = self._dec
 

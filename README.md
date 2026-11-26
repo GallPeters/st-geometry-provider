@@ -15,10 +15,11 @@
 - ST_Geometry tables open as normal QGIS layers: styling, labels, attribute table, identify, filters.
 - No ArcGIS, no database changes, no conversion to SDO_GEOMETRY.
 - Fast: local geometry decoding, bulk fetching, optional parallel sessions.
+- Load polygons as **lines** (boundaries) or **points** (centroid, always inside).
 - Optional fast overview for millions of features, and true curves (arcs).
 
 ## Install
-1. Download [`releases/st_geometry_provider-1.0.zip`](releases/st_geometry_provider-1.0.zip).
+1. Download [`releases/st_geometry_provider-1.1.zip`](releases/st_geometry_provider-1.1.zip).
 2. QGIS → *Plugins → Manage and Install Plugins → Install from ZIP*.
 3. Click **Add ST_Geometry Layer(s)…**, pick a connection, list tables, add.
 
