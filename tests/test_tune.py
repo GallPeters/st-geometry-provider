@@ -45,6 +45,16 @@ it = QTreeWidgetItem(["GIS", "BLDG", "SHAPE", str(N)])
 dlg.tree.addTopLevelItem(it)
 it.setSelected(True)
 
+dlg.show()
+QgsApplication.processEvents()
+check("dialog opens with Advanced settings collapsed (only connection, list, add visible)",
+      dlg.adv.isCollapsed() and dlg.tree.isVisible() and dlg.btn_add.isVisible() and dlg.btn_list.isVisible()
+      and not any(w.isVisible() for w in (dlg.parallel, dlg.chk_ov, dlg.chk_dom, dlg.btn_tune, dlg.btn_fast, dlg.btn_diag)))
+dlg.adv.setCollapsed(False)
+QgsApplication.processEvents()
+check("expanding Advanced settings shows every option and tool",
+      all(w.isVisible() for w in (dlg.parallel, dlg.chk_ov, dlg.chk_dom, dlg.chk_evw, dlg.idx_max, dlg.btn_tune, dlg.btn_fast)))
+dlg.hide()
 B.set_parallel_degree(1)
 B.set_overview(False)
 dlg.tune()

@@ -2,6 +2,13 @@
 
 ## 1.5
 
+- **Domain and subtype descriptions** (add-layer option, on by default), read once from `SDE.GDB_ITEMS` (standard Esri XML):
+  - **A:** `<FIELD>_DESC` text fields for every field with a coded-value domain, plus `<SUBTYPE>_DESC` with the subtype names. **Per-subtype domains are handled exactly:** each feature's description comes from its own subtype's domain, so the same code can mean different things per subtype. Raw values are kept.
+  - **B:** Value Map widgets (descriptions instead of codes in the attribute table and forms) on the subtype field and on raw fields whose domain is the same for every subtype.
+- **Value maps on every ST Geometry layer:** they're applied automatically whenever such a layer enters a project (dialog, Browser, script or a loaded project). Widgets you've changed yourself are kept.
+- **Simpler dialog:** it opens showing only the connection, *List tables*, the table list and *Add selected layer(s)*. All options and tools (Fastest settings, Tune, Diagnostics, Benchmark) are in a collapsible **Advanced settings** box, collapsed on open, as in QGIS processing tools.
+- New `test_combined.py` (18 checks, everything together: versioned view with misencoded edits, descriptions, value maps through the plugin's project hook, parallel, fast overview, points layer, and a project save/reload round trip).
+- New `test_domains.py` (13 checks: the same codes in different domains per subtype, fallback to the field's default domain, text-coded domains, NULLs, subset requests, filters, unique values, parallel strips, value maps).
 - **Fix: features in the wrong place (e.g. "in the sea") when reading through the versioned view.** Rows from ArcGIS's edit tables could be stored in a way the local decoder (verified on the base table only) decoded wrongly. Every decoded geometry must now reproduce Esri's stored envelope (`MINX…MAXY`); otherwise that row is converted by Esri on the server. This protects plain tables too. Cost: about 0.3 µs per feature.
 - **Much faster versioned view (`_EVW`): hybrid read.** Never-edited features (not in the `A<n>`/`D<n>` delta tables) are read from the base table, with the ST index, parallel strips and the local decoder. Only edited features are read through `_EVW`. The result is identical to reading `_EVW`; feature counts use the same split.
 - **Tests:** new `test_evw.py` (edits, inserts and deletes; parallel 1 and 4; wrongly-encoded edited rows; a corrupt base row). Without the envelope check it reproduces the problem: 25 buildings misplaced.

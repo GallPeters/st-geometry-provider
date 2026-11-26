@@ -6,6 +6,7 @@ import traceback
 
 from qgis.core import (QgsDataSourceUri, QgsVectorLayer, QgsProject, QgsFeatureRequest, QgsRectangle, QgsFeature)
 from qgis.PyQt.QtCore import Qt
+from qgis.gui import QgsCollapsibleGroupBox
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QComboBox, QPushButton, QLineEdit,
                                  QTreeWidget, QTreeWidgetItem, QCheckBox, QLabel, QMessageBox, QAbstractItemView,
                                  QApplication, QPlainTextEdit, QSpinBox, QDoubleSpinBox)
@@ -27,6 +28,11 @@ ORDER BY c.owner, c.table_name
 _BACKENDS = [("auto", "Auto (python-oracledb, fallback Qt OCI)"),
              ("oracledb", "python-oracledb only"),
              ("qsql", "Qt OCI driver only (slower)")]
+
+
+def self_cols_name(d, fields):
+    """Name of the raw field a description field was built from."""
+    return fields.at(d.src).name()
 
 
 class _Busy(object):
@@ -126,6 +132,13 @@ class AddLayerDialog(QDialog):
         self.chk_ext = QCheckBox("Compute exact data extent when adding (one-time scan; enables the fast plan for zoomed-out views)")
         self.chk_ext.setChecked(True)
         grid.addWidget(self.chk_ext, 3, 0, 1, 4)
+        self.chk_dom = QCheckBox("Domain / subtype descriptions (adds <FIELD>_DESC fields; value maps where unambiguous)")
+        self.chk_dom.setChecked(True)
+        self.chk_dom.setToolTip("Reads the Esri coded-value domains and subtypes from SDE.GDB_ITEMS. Each field with a "
+                                "domain gets a <FIELD>_DESC field (per-subtype domains handled exactly). Raw fields "
+                                "whose domain is the same for every subtype, and the subtype field, also show their "
+                                "descriptions in the attribute table and forms (Value Map). Raw values are unchanged.")
+        grid.addWidget(self.chk_dom, 8, 0, 1, 4)
         self.idx_max = QSpinBox()
         self.idx_max.setRange(0, 10000000)
         self.idx_max.setSingleStep(10000)
@@ -190,7 +203,18 @@ class AddLayerDialog(QDialog):
             lambda *_: B.set_curve_tolerance(self.curve_type.currentData(), self.curve_val.value()))
         self.curve_val.valueChanged.connect(
             lambda v: B.set_curve_tolerance(self.curve_type.currentData(), v))
-        lay.addLayout(grid)
+        # ---- everything except "list tables" and "add" lives in a collapsible Advanced box
+        self.adv = QgsCollapsibleGroupBox("Advanced settings")
+        self.adv.setObjectName("stgeometry_advanced")
+        try:
+            self.adv.setSaveCollapsedState(False)
+        except Exception:
+            pass
+        adv_lay = QVBoxLayout(self.adv)
+        adv_lay.addLayout(grid)
+        adv_btns = QHBoxLayout()
+        adv_lay.addLayout(adv_btns)
+        lay.addWidget(self.adv)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -206,14 +230,16 @@ class AddLayerDialog(QDialog):
         self.btn_bench = QPushButton("Benchmark current map view (first selected)")
         self.btn_add = QPushButton("Add selected layer(s)")
         self.btn_close = QPushButton("Close")
-        btns.addWidget(self.btn_fast)
-        btns.addWidget(self.btn_tune)
-        btns.addWidget(self.btn_diag)
-        btns.addWidget(self.btn_bench)
+        adv_btns.addWidget(self.btn_fast)
+        adv_btns.addWidget(self.btn_tune)
+        adv_btns.addWidget(self.btn_diag)
+        adv_btns.addWidget(self.btn_bench)
+        adv_btns.addStretch(1)
         btns.addStretch(1)
         btns.addWidget(self.btn_add)
         btns.addWidget(self.btn_close)
         lay.addLayout(btns)
+        self.adv.setCollapsed(True)                    # opens showing only: connection, list, add
 
         self.btn_list.clicked.connect(self.list_tables)
         self.btn_add.clicked.connect(self.add_layers)
@@ -312,6 +338,7 @@ class AddLayerDialog(QDialog):
         self.chk_2d.setChecked(True)
         self.chk_evw.setChecked(False)
         self.chk_ext.setChecked(True)
+        self.chk_dom.setChecked(True)
         self.gtype.setCurrentIndex(0)
         self.status.setText("Fastest settings applied (re-add layers that were added with other options).")
 
@@ -384,6 +411,8 @@ class AddLayerDialog(QDialog):
             u.setParam("stgeomtype", gt)
         if self.chk_ext.isChecked():
             u.setParam("stcalcext", "1")
+        if self.chk_dom.isChecked():
+            u.setParam("stdomains", "1")
         ga = self.geom_as.currentData()
         if ga:
             u.setParam("stgeomas", ga)
@@ -406,7 +435,13 @@ class AddLayerDialog(QDialog):
                         layer = l2
             except Exception as e:
                 C.log("Could not store detected layer settings: %s" % e, "warning")
+            self._apply_value_maps(layer, it)
         return layer
+
+    def _apply_value_maps(self, layer, it):
+        """Option B (also applied automatically to every ST Geometry layer added to a project)."""
+        from .valuemaps import apply_value_maps
+        apply_value_maps(layer)
 
     def add_layers(self):
         items = self._selected()

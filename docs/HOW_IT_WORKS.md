@@ -487,6 +487,8 @@ Add-layer dialog → **Load polygons as** (polygon tables only):
 
 ## 20. Fastest settings (the defaults)
 
+> **Where the options are:** the add-layer dialog opens showing only the connection, *List tables*, the table list and *Add selected layer(s)*. Every option in this document, and the Fastest settings, Tune, Diagnostics and Benchmark buttons, are under **Advanced settings** (collapsed by default; click to expand).
+
 All defaults are chosen for the fastest loading and drawing. The dialog's **Fastest settings** button applies them again at any time; settings saved earlier in your QGIS profile otherwise take priority over defaults.
 
 | Option | Fastest / default | Reason |
@@ -523,3 +525,30 @@ through QGIS's real renderer, after a warm-up render and taking the best of two 
 **Why the strategy changed in 1.3.** Earlier versions split parallel index reads with `MOD(OBJECTID, N)`, which repeated the full ST index search in every session. The fast overview also used two queries, which ran the spatial filter twice. Both multiplied work on the database server. In 1.3:
 - parallel index reads are split into **view strips**, so the index work is divided between sessions;
 - the overview is a **single query**.
+
+
+---
+
+## 22. Domain and subtype descriptions
+
+Add-layer dialog → **Domain / subtype descriptions** (ticked by default). The plugin reads the geodatabase's standard Esri XML **once when the layer loads** from `SDE.GDB_ITEMS`:
+- the **feature class item**: each field's default domain, the subtype field, and per subtype the domain of each field;
+- the **coded-value domain items**: code → description.
+
+### A: description fields (raw values kept)
+Every field that has a domain gets a text field **`<FIELD>_DESC`**, and the subtype field gets **`<SUBTYPE>_DESC`** with the subtype names. For each feature:
+
+```
+(feature's subtype code, field)  →  domain  →  code  →  description
+```
+
+So the **same code can mean different things in different subtypes**, and each feature gets the description of *its own* subtype's domain. If a subtype defines no domain for a field, the field's default domain applies, as in ArcGIS. NULL codes give NULL descriptions.
+
+The description fields behave like any other field: attribute table, identify, labels, styles (e.g. categorized by `LANDUSE_DESC`), filters and unique values. They're computed on your PC with a dictionary lookup per value; when only a description field is requested, the plugin fetches the raw and subtype columns it needs automatically.
+
+### B: Value Map widgets (descriptions instead of codes)
+Applied automatically to **every** ST Geometry layer with descriptions that enters a project: added from the dialog, the Browser, a script, or a reloaded project. Widgets you've changed yourself are kept.
+
+Raw fields whose domain is **the same for every subtype**, and the subtype field itself, also get a QGIS **Value Map** widget, so the attribute table and forms show descriptions instead of codes. Fields whose domain **differs between subtypes** don't get one: QGIS gives a field only one value list, so a value map there would be wrong for some features. Their `_DESC` field is exact.
+
+The raw values are never changed. If `SDE.GDB_ITEMS` isn't readable for your user, the layer loads without descriptions and the log says why.

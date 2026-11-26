@@ -40,6 +40,7 @@ from .expr_compiler import compile_filter
 from . import st_decoder
 from .backend import decoder_pref, overview_enabled, overview_pixels, curves_mode, curve_tolerance
 from . import st_curves
+from . import domains as DOM
 from qgis.core import QgsAbstractGeometry
 
 DECODERS = {}   # layer label -> verified EsriDecoder (used by the benchmark)
@@ -49,6 +50,7 @@ PROVIDER_DESC = "ST Geometry Provider (Esri ST_Geometry in Oracle)"
 DEFAULT_CRS = "EPSG:4326"
 
 LAST_ERRORS = {}   # "OWNER.TABLE" -> last error text (shown by the dialog)
+DOMAIN_INFO = {}   # "OWNER.TABLE" -> [DescField] (value maps for the dialog)
 _metadata = None
 
 
@@ -214,6 +216,7 @@ class StFeatureSource(QgsAbstractFeatureSource):
         self.geom_sql = "t." + qi(p._geom)
         self.key_sql = "t." + qi(p._key)
         self.cols = list(p._cols)
+        self.desc = list(p._desc)                    # description fields after the real columns
         self.colmap = {c.name.upper(): c for c in self.cols}
         self.fields = QgsFields(p._fields)
         self.wkb = p._wkb
@@ -310,8 +313,26 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
             idx = sorted(i for i in set(req.subsetOfAttributes()) if 0 <= i < nf)
         else:
             idx = list(range(nf))
+        nreal = len(s.cols)
+        real_req = [i for i in idx if i < nreal]
+        desc_req = [i for i in idx if i >= nreal]
+        need = set(real_req)
+        for i in desc_req:
+            d = s.desc[i - nreal]
+            need.add(d.src)
+            if d.sub is not None:
+                need.add(d.sub)
+        real_sel = sorted(need)
+        pos = {ci: 1 + j for j, ci in enumerate(real_sel)}
         self._idx = idx
         self._nf = nf
+        self._nreal = nreal
+        self._real_sel = real_sel
+        self._all_real = real_req == list(range(nreal)) and real_sel == real_req
+        self._desc_pad = [None] * (nf - nreal)
+        self._desc_jobs = [(i, pos[s.desc[i - nreal].src],
+                            pos[s.desc[i - nreal].sub] if s.desc[i - nreal].sub is not None else None,
+                            s.desc[i - nreal].fn) for i in desc_req]
         self._want_geom = not C.has_flag(flags, C.FLAG_NO_GEOMETRY)
         rect = self._rect
         has_rect = rect is not None and not rect.isNull()
@@ -366,7 +387,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
         else:
             def W(e):
                 return e
-        sel = [s.key_sql] + [s.cols[i].sql for i in idx]
+        sel = [s.key_sql] + [s.cols[i].sql for i in real_sel]
         if self._need_geom:
             if s.dec is not None:
                 sel += ["%s.entity" % g, "%s.numpts" % g, "%s.area" % g,
@@ -512,10 +533,10 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
             self._parts = list(self._parts) + [(esql, params)]
 
         # ---- precomputed attribute placement (hot loop helpers)
-        self._all_attrs = idx == list(range(nf))
-        self._conv_pos = [(1 + j, i) for j, i in enumerate(idx) if s.cols[i].kind == "datetime"]
-        self._pairs = [(1 + j, i) for j, i in enumerate(idx)]
-        self._na1 = 1 + len(idx)                     # end of the attribute columns in a row
+        self._all_attrs = self._all_real
+        self._conv_pos = [(pos[i], i) for i in real_req if s.cols[i].kind == "datetime"]
+        self._pairs = [(pos[i], i) for i in real_req]
+        self._na1 = 1 + len(real_sel)                # end of the attribute columns in a row
         self._geom_ok_type = s.wkb
         # batch decoding only when the geometry columns (entity, numpts, area, points, wkb) are selected
         self._batch_dec = bool(self._need_geom and s.dec is not None and getattr(s.dec, "batch_capable", False))
@@ -729,13 +750,17 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                 f.setFields(s.fields, False)
                 f.setId(fid if fid.__class__ is int else int(fid))
                 if self._all_attrs:
-                    attrs = list(row[1:1 + nf])
+                    attrs = list(row[1:1 + self._nreal])
+                    if self._desc_pad:
+                        attrs.extend(self._desc_pad)
                 else:
                     attrs = [None] * nf
                     for j, i in self._pairs:
                         attrs[i] = row[j]
                 for j, i in self._conv_pos:
                     attrs[i] = to_qgis_value(row[j])
+                for i, sp, bp, fn in self._desc_jobs:         # domain / subtype descriptions
+                    attrs[i] = fn(row[sp], row[bp] if bp is not None else None)
                 f.setAttributes(attrs)
                 if typed and self._want_geom:
                     f.setGeometry(geom)
@@ -830,6 +855,7 @@ class StGeometryProvider(QgsVectorDataProvider):
         self._geom_as = ""
         self._changed_sql = None
         self._base_rel = ""
+        self._desc = []
         try:
             t0 = time.time()
             self._load(uri)
@@ -926,6 +952,18 @@ class StGeometryProvider(QgsVectorDataProvider):
                 raise RuntimeError("No integer unique key column found in %s; add key='COLUMN' to the layer source." % self._label)
             self._key = key
             self._key_index = names.index(key)
+
+            # ---- Esri domains / subtypes -> '<FIELD>_DESC' description fields (read once)
+            self._desc = []
+            if u.hasParam("stdomains") and u.param("stdomains") == "1":
+                try:
+                    self._desc = DOM.load(conn, owner, table, [(c.name, c.kind) for c in self._cols],
+                                          cache_key=(id(self._backend), owner, table), log=C.log)
+                except Exception as e:
+                    C.log("%s: domain descriptions not available: %s" % (self._label, e), "warning")
+                for d in self._desc:
+                    self._fields.append(QgsField(d.name, C.make_field_type("string"), "description"))
+                DOMAIN_INFO[self._label] = self._desc
             if u.hasParam("stkeys"):
                 try:
                     lo, hi = u.param("stkeys").split(",")
@@ -1428,6 +1466,9 @@ class StGeometryProvider(QgsVectorDataProvider):
 
     def uniqueValues(self, fieldIndex, limit=-1):  # noqa: N802,N803
         out = set()
+        if self._valid and len(self._cols) <= fieldIndex < len(self._cols) + len(self._desc):
+            vals = self._desc[fieldIndex - len(self._cols)].values
+            return set(vals if limit is None or limit < 0 else vals[:limit])
         if not self._valid or fieldIndex < 0 or fieldIndex >= len(self._cols):
             return out
         col = self._cols[fieldIndex].sql

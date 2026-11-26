@@ -12,6 +12,7 @@ except ImportError:
     from qgis.PyQt.QtWidgets import QAction
 
 from .provider import register_provider
+from . import valuemaps
 from . import compat as C
 
 MENU = "ST Geometry Provider"
@@ -25,6 +26,7 @@ class StGeometryPlugin(object):
 
     def initGui(self):  # noqa: N802
         register_provider()
+        valuemaps.connect_project()          # value maps for every ST Geometry layer added to a project
         icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "icon.png")
         icon = QIcon(icon_path) if os.path.exists(icon_path) else QgsApplication.getThemeIcon("/mActionAddOracleLayer.svg")
         self.action = QAction(icon, "Add ST_Geometry Layer(s)...", self.iface.mainWindow())
@@ -40,6 +42,7 @@ class StGeometryPlugin(object):
             pass
 
     def unload(self):
+        valuemaps.disconnect_project()
         if self.action is None:
             return
         try:
