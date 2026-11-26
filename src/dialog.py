@@ -89,6 +89,7 @@ class AddLayerDialog(QDialog):
 
         grid = QGridLayout()
         self.chk_2d = QCheckBox("Force 2D (drop Z/M)")
+        self.chk_2d.setChecked(True)                    # fastest: smaller geometries, no Z verification needed
         self.chk_evw = QCheckBox("Read through versioned view (<TABLE>_EVW) when it exists")
         self.gtype = QComboBox()
         for v, t in (("auto", "Auto-detect"), ("polygon", "Polygon"), ("line", "Line"), ("point", "Point")):
@@ -194,10 +195,13 @@ class AddLayerDialog(QDialog):
         lay.addWidget(self.status)
 
         btns = QHBoxLayout()
+        self.btn_fast = QPushButton("Fastest settings")
+        self.btn_fast.setToolTip("Apply the fastest load/render configuration to every option in this dialog")
         self.btn_diag = QPushButton("Diagnostics (first selected)")
         self.btn_bench = QPushButton("Benchmark current map view (first selected)")
         self.btn_add = QPushButton("Add selected layer(s)")
         self.btn_close = QPushButton("Close")
+        btns.addWidget(self.btn_fast)
         btns.addWidget(self.btn_diag)
         btns.addWidget(self.btn_bench)
         btns.addStretch(1)
@@ -208,6 +212,7 @@ class AddLayerDialog(QDialog):
         self.btn_list.clicked.connect(self.list_tables)
         self.btn_add.clicked.connect(self.add_layers)
         self.btn_diag.clicked.connect(self.diagnostics)
+        self.btn_fast.clicked.connect(self.apply_fastest)
         self.btn_bench.clicked.connect(self.benchmark)
         self.btn_close.clicked.connect(self.reject)
         self.search.textChanged.connect(self.apply_filter)
@@ -230,6 +235,24 @@ class AddLayerDialog(QDialog):
                                 "or create one in Browser > Oracle > New Connection.")
 
     # ------------------------------------------------------------------
+    def apply_fastest(self):
+        """Fastest configuration: saved settings + the per-layer options of this dialog."""
+        B.reset_fast_defaults()
+        F = B.FAST
+        self.backend_combo.setCurrentIndex([v for v, _ in _BACKENDS].index(F["backend"]))
+        self.parallel.setValue(F["parallel"])
+        self.idx_max.setValue(F["index_max_rows"])
+        self.dec_combo.setCurrentIndex(0)
+        self.chk_ov.setChecked(F["overview"])
+        self.ov_px.setValue(F["overview_px"])
+        self.curve_combo.setCurrentIndex(0)
+        self.chk_timing.setChecked(F["timing"])
+        self.chk_2d.setChecked(True)
+        self.chk_evw.setChecked(False)
+        self.chk_ext.setChecked(True)
+        self.gtype.setCurrentIndex(0)
+        self.status.setText("Fastest settings applied (re-add layers that were added with other options).")
+
     def _backend_changed(self, *_):
         B.set_backend_pref(self.backend_combo.currentData())
 

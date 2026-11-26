@@ -271,6 +271,8 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
         self._srv_conn = None
         self._n_fallback = 0
         self._batch = []
+        self._next_batch = None
+        self._pre_typed = False
         self._blen = 0
         self._bi = 0
         self._pre = None
@@ -496,6 +498,9 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
         self._geom_ok_type = s.wkb
         # batch decoding only when the geometry columns (entity, numpts, area, points, wkb) are selected
         self._batch_dec = bool(self._need_geom and s.dec is not None and getattr(s.dec, "batch_capable", False))
+        # batch output is the plain Multi(Z) layer type unless the layer converts or uses curves
+        self._pre_typed = bool(self._batch_dec and not s.geom_as and not QgsWkbTypes.isCurvedType(s.wkb)
+                               and not QgsWkbTypes.hasM(s.wkb) and s.dec.keep_z == QgsWkbTypes.hasZ(s.wkb))
 
     # ----------------------------------------------------------- iteration
     def _open(self):
@@ -504,6 +509,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                 self._s.label, self._spatial_used, "yes" if self._need_geom else "no",
                 "local" if self._s.dec is not None else "server", len(self._parts) or 1,
                 self._plan_info))
+        self._next_batch = None
         if self._s.parallel > 1:
             # background fetch threads (1..N partitions): network/DB work overlaps
             # with feature building in this thread
@@ -514,6 +520,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                 self._rows = _chain(self._conn, self._parts)
             else:
                 self._rows = self._conn.query(self._sql, self._params)
+        self._next_batch = getattr(self._rows, "next_batch", None)
 
     def _log_timing(self):
         t0, self._t0 = self._t0, None
@@ -630,7 +637,8 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                 if self._bi >= self._blen:
                     if timing:
                         ta = perf_counter()
-                    self._batch = list(islice(self._rows, BATCH_ROWS))
+                    nb = self._next_batch
+                    self._batch = nb() if nb is not None else list(islice(self._rows, BATCH_ROWS))
                     if timing:
                         tb = perf_counter()
                         self._t_db += tb - ta
@@ -652,6 +660,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                 if fid is None:
                     continue
                 geom = None
+                typed = False                                  # geometry already in the layer type?
                 if self._ov and len(row) == self._cell_len:
                     geom = self._cell_geom(row[-3], row[-2])
                     self._n_cells += 1
@@ -668,6 +677,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                         pass                                   # true curve already built
                     elif pre is not None:
                         geom = pre                             # decoded with the batch
+                        typed = self._pre_typed
                     elif s.dec is None or w is not None:
                         geom = wkb_to_geometry(w)
                     elif row[-2] is not None:
@@ -683,7 +693,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                         if geom is None or geom.isNull() or geom.distance(self._dist_geom) > self._dist:
                             continue
                 f.setFields(s.fields, False)
-                f.setId(int(fid))
+                f.setId(fid if fid.__class__ is int else int(fid))
                 if self._all_attrs:
                     attrs = list(row[1:1 + nf])
                 else:
@@ -693,7 +703,11 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                 for j, i in self._conv_pos:
                     attrs[i] = to_qgis_value(row[j])
                 f.setAttributes(attrs)
-                if self._want_geom and geom is not None and not geom.isNull():
+                if typed and self._want_geom:
+                    f.setGeometry(geom)
+                    if self._has_transform:
+                        self.geometryToDestinationCrs(f, self._transform)
+                elif self._want_geom and geom is not None and not geom.isNull():
                     if geom.wkbType() != self._geom_ok_type:
                         geom = normalize_geometry(geom, s.wkb, s.force2d)
                     f.setGeometry(geom)

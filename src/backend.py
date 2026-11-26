@@ -38,7 +38,7 @@ SETTINGS_BACKEND = "stgeometry/backend"   # auto | oracledb | qsql
 SETTINGS_PARALLEL = "stgeometry/parallel"  # sessions per big geometry read (1 = off)
 ARRAYSIZE = 2000
 SDU = 65536            # requested network packet size (negotiated down by the server if needed)
-POOL_MAX = 48
+POOL_MAX = 64          # room for several layers drawing with parallel sessions
 _parallel = None
 
 _lock = threading.RLock()
@@ -63,6 +63,10 @@ def set_backend_pref(value):
         _backends.clear()
 
 
+# fastest configuration (also the defaults) - see reset_fast_defaults()
+FAST = {"backend": "auto", "parallel": 8, "index_max_rows": 50000, "decoder": "auto",
+        "overview": True, "overview_px": 1.0, "curves": "off", "timing": False}
+
 SETTINGS_TIMING = "stgeometry/timing"
 _timing = None
 
@@ -78,9 +82,9 @@ def index_max_rows():
 def overview_enabled():
     """Map rendering only: draw sub-pixel features as one pixel square per style value (no geometry fetch)."""
     try:
-        return str(QgsSettings().value("stgeometry/overview", "0")) in ("1", "true", "True")
+        return str(QgsSettings().value("stgeometry/overview", "1")) in ("1", "true", "True")
     except Exception:
-        return False
+        return True
 
 
 def set_overview(on):
@@ -122,6 +126,18 @@ def curve_tolerance():
 def set_curve_tolerance(t, v):
     QgsSettings().setValue("stgeometry/curve_tol_type", t)
     QgsSettings().setValue("stgeometry/curve_tol", float(v))
+
+
+def reset_fast_defaults():
+    """Apply the fastest load/render configuration to all plugin settings."""
+    set_backend_pref(FAST["backend"])
+    set_parallel_degree(FAST["parallel"])
+    set_index_max_rows(FAST["index_max_rows"])
+    set_decoder_pref(FAST["decoder"])
+    set_overview(FAST["overview"])
+    set_overview_pixels(FAST["overview_px"])
+    set_curves_mode(FAST["curves"])
+    set_timing(FAST["timing"])
 
 
 def decoder_pref():
@@ -209,9 +225,9 @@ def parallel_degree():
     global _parallel
     if _parallel is None:
         try:
-            _parallel = int(QgsSettings().value("stgeometry/parallel_v12", 1))
+            _parallel = int(QgsSettings().value("stgeometry/parallel_v12", FAST["parallel"]))
         except Exception:
-            _parallel = 1
+            _parallel = FAST["parallel"]
         _parallel = max(1, min(16, _parallel))
     return _parallel
 
@@ -422,6 +438,9 @@ class _OraRows(object):
 
     next = __next__
 
+    def next_batch(self):
+        return self.fetch_batch()
+
     def fetch_batch(self):
         """Next batch of rows as a list ([] when finished)."""
         if self.cur is None:
@@ -591,6 +610,27 @@ class ParallelRows(object):
         return r
 
     next = __next__
+
+    def next_batch(self):
+        """Next list of rows ([] when finished) - whole batches, no per-row Python call."""
+        if self._i < len(self._buf):
+            b, self._buf, self._i = self._buf[self._i:], [], 0
+            return b
+        while self._pending > 0:
+            try:
+                item = self._q.get(timeout=1.0)
+            except queue.Empty:
+                if not any(t.is_alive() for t in self._threads) and self._q.empty():
+                    self._pending = 0
+                continue
+            if item is _DONE:
+                self._pending -= 1
+                continue
+            if isinstance(item, Exception):
+                self.close()
+                raise item
+            return item
+        return []
 
     def close(self):
         self._stop.set()

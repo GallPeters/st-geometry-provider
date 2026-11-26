@@ -96,6 +96,7 @@ class EsriDecoder(object):
         self.zmode = zmode            # 'i'/'b' = interleaved / block after XY ; 'd'/'a' = delta / absolute
         self.keep_z = keep_z and self.uz is not None
         self.entities = tuple(entities)
+        self.entities_set = frozenset(self.entities)
 
     # ------------------------------------------------------------------ core
     def _coords(self, npts, points):
@@ -356,23 +357,15 @@ def _decode_batch(self, ents, npts, blobs):
     out = [None] * len(blobs)
     if np is None:
         return out
-    sel, views, nlist, elist = [], [], [], []
-    ents_ok = self.entities
-    for i in range(len(blobs)):
-        b, e, n = blobs[i], ents[i], npts[i]
-        if b is None or e is None or n is None:
-            continue
-        e, n = int(e), int(n)
-        if e not in ents_ok or n <= 0 or len(b) <= 8 or b[-1] >= 0x80:   # last value truncated -> per-row path
-            continue
-        sel.append(i)
-        views.append(memoryview(b)[8:])
-        nlist.append(n)
-        elist.append(e)
+    ok_e = self.entities_set
+    sel = [i for i in range(len(blobs))
+           if ents[i] in ok_e and npts[i] and blobs[i] is not None and len(blobs[i]) > 8
+           and blobs[i][-1] < 0x80]                           # truncated last value -> per-row path
     if not sel:
         return out
-    buf = np.frombuffer(b"".join(views), dtype=np.uint8)
-    blen = np.fromiter((len(v) for v in views), dtype=np.int64, count=len(views))
+    parts = [blobs[i] for i in sel]
+    buf = np.frombuffer(b"".join([p[8:] for p in parts]), dtype=np.uint8)
+    blen = np.fromiter(map(len, parts), dtype=np.int64, count=len(parts)) - 8
     bend = np.cumsum(blen)
     bstart = bend - blen
     term = buf < 0x80
@@ -386,14 +379,13 @@ def _decode_batch(self, ents, npts, blobs):
     vals = np.where((buf[gstart] & 0x40) != 0, -vals, vals)
     cnt = np.add.reduceat(term.astype(np.int64), bstart)        # values per blob
     voff = np.cumsum(cnt) - cnt
-    nn = np.asarray(nlist, dtype=np.int64)
+    nn = np.array([npts[i] for i in sel], dtype=np.int64)
+    ee = np.array([ents[i] for i in sel], dtype=np.int64)
     d = np.where(cnt == 2 * nn, 2, np.where(cnt == 3 * nn, 3, 0))
-    ok = d > 0
-    if not ok.any():
+    vidx = np.flatnonzero(d > 0)
+    if not vidx.size:
         return out
-    # keep valid blobs only
-    vidx = np.flatnonzero(ok)
-    nn, d, voff = nn[vidx], d[vidx], voff[vidx]
+    nn, d, voff, ee = nn[vidx], d[vidx], voff[vidx], ee[vidx]
     total = int(nn.sum())
     ptstart = np.cumsum(nn) - nn
     rep = np.repeat
@@ -413,54 +405,55 @@ def _decode_batch(self, ents, npts, blobs):
 
     Xa, Ya = acc(X), acc(Y)
     hz = self.keep_z
-    Z = None
+    dim = 3 if hz else 2
+    C = np.empty(total * dim)
+    C[0::dim] = self.fx + Xa * self.inv
+    C[1::dim] = self.fy + Ya * self.inv
     if hz:
         zi = (xi + 2) if inter else (vo + 2 * rep(nn, nn) + i_in)
         Zr = np.where(dd == 3, vals[np.where(dd == 3, zi, 0)], 0)
         Za = acc(Zr) if self.zmode[1] == "d" else Zr
-        Z = self.fz + Za * self.invz if self.invz else np.zeros(total)
-        Z = np.where(dd == 3, Z, 0.0)
-    xs = self.fx + Xa * self.inv
-    ys = self.fy + Ya * self.inv
+        C[2::dim] = (self.fz + Za * self.invz) if self.invz else 0.0
     eq = (Xa == rep(Xa[ptstart], nn)) & (Ya == rep(Ya[ptstart], nn))
     neq = np.add.reduceat(eq.astype(np.int64), ptstart)
     last_eq = eq[ptstart + nn - 1]
-    dim = 3 if hz else 2
-    C = np.empty(total * dim)
-    C[0::dim] = xs
-    C[1::dim] = ys
+
+    # which rows this batch path accepts (everything else -> unchanged per-row path)
+    accept = (((ee == ENT_POLY) & (nn >= 4) & (neq == 2) & last_eq)   # single closed ring
+              | ((ee == ENT_POINT) & (nn == 1))
+              | ((ee == ENT_LINE) & (nn >= 2)))
     if hz:
-        C[2::dim] = Z
-    cb = C.tobytes()
+        accept &= d == 3                            # 2D row in a Z layer: per-row path (identical output)
+    a_idx = np.flatnonzero(accept)
+    if not a_idx.size:
+        return out
+
+    # ---- per-feature WKB: one struct pack for the header + one slice of the coordinate buffer
     step = 8 * dim
+    cb = C.tobytes()
     mtype, ptype = (1006, 1003) if hz else (6, 3)
-    hdr_poly = _PACK_HDR(1, mtype, 1) + _PACK_HDR(1, ptype, 1)
-    hdr_mpt = _PACK_HDR(1, 1004 if hz else 4, 1) + struct.pack("<BI", 1, 1001 if hz else 1)
     ltype = (1005, 1002) if hz else (5, 2)
-    starts_l, nn_l, neq_l, last_l, d_l = ptstart.tolist(), nn.tolist(), neq.tolist(), last_eq.tolist(), d.tolist()
-    for j, v in enumerate(vidx.tolist()):
-        if hz and d_l[j] != 3:
-            continue                                  # 2D row in a Z layer: per-row path (identical output)
-        e = elist[v]
-        n = nn_l[j]
-        a = starts_l[j] * step
+    pk_poly = struct.Struct("<BIIBIII").pack          # MultiPolygon(1 part) + Polygon(1 ring) + n
+    pk_line = struct.Struct("<BIIBII").pack           # MultiLineString(1 part) + LineString(n)
+    hdr_pt = _PACK_HDR(1, 1004 if hz else 4, 1) + struct.pack("<BI", 1, 1001 if hz else 1)
+    Geom = QgsGeometry
+    tgt = [sel[v] for v in vidx[a_idx].tolist()]
+    if (ea := ee[a_idx]).min() == ea.max() == ENT_POLY:      # common case: polygon layer
+        for t, n, a in zip(tgt, nn[a_idx].tolist(), (ptstart[a_idx] * step).tolist()):
+            g = Geom()
+            g.fromWkb(pk_poly(1, mtype, 1, 1, ptype, 1, n) + cb[a:a + n * step])
+            out[t] = g
+        return out
+    for t, e, n, a in zip(tgt, ea.tolist(), nn[a_idx].tolist(), (ptstart[a_idx] * step).tolist()):
         if e == ENT_POLY:
-            if n < 4 or neq_l[j] != 2 or not last_l[j]:
-                continue                              # several rings / unclosed -> per-row path
-            w = hdr_poly + _PACK_U32(n) + cb[a:a + n * step]
+            w = pk_poly(1, mtype, 1, 1, ptype, 1, n) + cb[a:a + n * step]
         elif e == ENT_POINT:
-            if n != 1:
-                continue
-            w = hdr_mpt + cb[a:a + step]
-        elif e == ENT_LINE:
-            if n < 2:
-                continue
-            w = _PACK_HDR(1, ltype[0], 1) + _PACK_HDR(1, ltype[1], n) + cb[a:a + n * step]
+            w = hdr_pt + cb[a:a + step]
         else:
-            continue
-        g = QgsGeometry()
+            w = pk_line(1, ltype[0], 1, 1, ltype[1], n) + cb[a:a + n * step]
+        g = Geom()
         g.fromWkb(w)
-        out[sel[v]] = g
+        out[t] = g
     return out
 
 

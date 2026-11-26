@@ -1,6 +1,6 @@
 # ST Geometry Provider for QGIS: what it does and how it works
 
-Version 1.1 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
+Version 1.2 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
 
 ---
 
@@ -39,7 +39,7 @@ Here is how this differs from the query layer you used before:
 | Server-side conversion | `sde.st_astext` makes WKT text, then `SDO_UTIL.FROM_WKTGEOMETRY` (Java inside Oracle) makes SDO_GEOMETRY | `sde.st_asbinary` makes WKB (binary, no text, no Java, no SDO) |
 | Transfer | SDO object, one LOB fetched per row | WKB bytes fetched inline, 1000 rows per round trip |
 | Client | QGIS Oracle provider decodes SDO | QGIS decodes WKB directly |
-| Z | Forced to 2D | Kept (optional "Force 2D") |
+| Z | Forced to 2D | Dropped by default ("Force 2D"); can be kept |
 | Map extent filter | Envelope of the converted SDO | ST spatial index (`sde.st_envintersects`) |
 
 ---
@@ -104,7 +104,7 @@ WHERE  sde.st_envintersects(t."SHAPE", :xmin, :ymin, :xmax, :ymax) = 1   -- ST s
 
 - If the visible extent contains the whole layer, the spatial condition is left out, so a plain scan is used.
 - Rows arrive in batches of 1000. Each WKB becomes a `QgsGeometry`, and the feature goes to the QGIS renderer.
-- With **parallel sessions** (default 1, i.e. off; set 2–16 in the dialog), a big read is split into N parts that run at the same time on N Oracle sessions (§8).
+- With **parallel sessions** (default 8; 1–16 in the dialog), a big read is split into N parts that run at the same time on N Oracle sessions (§8).
 
 ### 4.3 Attribute table, Identify, selection
 
@@ -191,7 +191,7 @@ Early measurements with the Qt OCI driver showed that reading the raw LOB, `st_a
 1. **LOBs fetched inline.** The python-oracledb driver is told to return BLOB/CLOB values as plain bytes/strings inside each batch, instead of LOB handles that each need an extra round trip. This was the main bottleneck.
 2. **Batches of 1000 rows** (array size + prefetch) per network round trip.
 3. **ST spatial index** for the map extent (`sde.st_envintersects`); skipped when the whole layer is visible.
-4. **Parallel sessions** (default 1, i.e. off). A big map read is split into N partitions fetched concurrently, each on its own Oracle session, and therefore its own Esri extproc process.
+4. **Parallel sessions** (default 8). A big map read is split into N partitions fetched concurrently, each on its own Oracle session, and therefore its own Esri extproc process.
    - With a spatial filter, rows are split by `MOD(OBJECTID, N)`.
    - Without one (whole layer), they're split by OBJECTID ranges, so each session scans only its own part of the key index.
    - The first and last ranges are open-ended, so rows added later are never missed.
@@ -378,7 +378,7 @@ Each merged row is drawn as **one pixel-sized square** (or a point/short line fo
 - Labels on sub-pixel features are placed on the pixel square. Such labels are usually hidden by label collision anyway.
 
 **Control (dialog):** *Fast overview: draw features smaller than [N px] as pixel cells*.
-- **Off by default.** Tick it to enable. It applies to all layers from the next redraw.
+- **On by default** (fastest). Untick it to always draw full geometries. It applies to all layers from the next redraw.
 - **N** (0.5–10 px, default 1). Features whose envelope is smaller than N screen pixels are merged into N-pixel cells. Higher N means faster but coarser at small scales.
 
 It needs QGIS's standard drawing optimisation, which is on by default in QGIS Desktop (Layer Properties → Rendering → *Simplify geometry*). That's how the pixel size reaches the provider. This was verified in QGIS 4.2.3: a render request carries `OptimizeForRendering` with a tolerance of exactly one pixel in map units.
@@ -448,7 +448,7 @@ Profiled with cProfile on 20,000 features inside QGIS 4.2.3. Each change was che
 | Overview pixel cells written directly as WKB in the layer's type | **2.2× faster** per cell, identical geometry |
 | numpy missing | Automatically falls back to per-feature decoding |
 
-**Result:** the plugin's own cost per feature with geometry is about **12 µs** (about 35% less than per-feature decoding). All test suites pass: 36/36 functional and 14/14 true-curve tests.
+**Result:** the plugin plus QGIS costs about **9 µs per feature with geometry** and about 5.6 µs for attribute-only reads. Rows are handed over in whole batches (no per-row Python call); each binary geometry is one struct-packed header plus one slice of the coordinate buffer; batch-decoded geometries already have the layer type and skip the per-feature type check. An attempt to also build all binary geometries in a single numpy buffer turned out slower and was dropped. All test suites pass: 36/36 functional and 14/14 true-curve tests.
 
 
 ---
@@ -466,3 +466,27 @@ Add-layer dialog → **Load polygons as** (polygon tables only):
 - **Per layer, not global.** The mode is stored in the layer source (`stgeomas='boundary'` or `'point'`), so the same table can be added several times, e.g. as polygons and as labelled points.
 - **Where it happens.** The conversion runs on your PC right after the geometry is decoded, so identify, selection and distance tools work on the lines or points. Spatial filtering still uses the polygon's envelope, which always contains its boundary and its interior point. In fast overview mode, merged pixel cells are drawn as points or short lines to match the layer type.
 - **Attributes and feature ids** are unchanged.
+
+
+---
+
+## 20. Fastest settings (the defaults)
+
+All defaults are chosen for the fastest loading and drawing. The dialog's **Fastest settings** button applies them again at any time; settings saved earlier in your QGIS profile otherwise take priority over defaults.
+
+| Option | Fastest / default | Reason |
+|---|---|---|
+| Driver | Auto (python-oracledb) | Bulk fetch with inline LOBs |
+| Geometry decoding | Local decoder where verified | No per-row conversion on the server |
+| Parallel sessions per layer | **8** | Large reads split across sessions. More sessions add database load for little extra gain once decoding is local. |
+| Use plain scan above | 50,000 estimated rows | Index for small views, scan for huge ones |
+| Fast overview | **On**, 1 px | No geometry fetched for sub-pixel features (map drawing only) |
+| Arcs (true curves) | Off | Curves cost extra parsing and drawing |
+| Force 2D | **Ticked** | Smaller geometries; the decoder needs no Z verification |
+| Versioned view (_EVW) | Off | The view is slower than the base table |
+| Compute exact data extent | On | Needed for the index/scan choice and the overview estimate |
+| Load polygons as | Polygons | No conversion |
+| Timing log | Off | |
+| Connection pool | up to 64 sessions | Room for several layers drawing in parallel |
+
+> **Note for the DBA:** with these defaults, drawing one large layer can use up to 8 sessions. If that's too many for a shared database, lower *Parallel sessions* (1 = a single session).

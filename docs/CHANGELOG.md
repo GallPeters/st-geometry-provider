@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2
+
+- **Fastest settings by default:**
+  - parallel sessions 8 (was 1);
+  - fast overview on (1 px);
+  - Force 2D ticked for new layers;
+  - connection pool up to 64 sessions.
+- **New dialog button, *Fastest settings*:** applies the fastest configuration to every option, including settings saved earlier in your QGIS profile.
+- **Faster reading, profiled in QGIS 4.2.3:**
+  - rows are handed over in whole batches, with no per-row Python call;
+  - rows are selected for the batch decoder with comprehensions;
+  - each feature's binary geometry header is one struct pack instead of several concatenations;
+  - batch-decoded geometries skip the per-feature type check.
+
+  The plugin plus QGIS now costs about **9 µs per feature with geometry** (was about 12) and about 5.6 µs for attribute-only reads. Output is unchanged: 0 mismatches against the per-feature decoder.
+
 ## 1.1
 
 - **Load polygons as lines or points.** In the add-layer dialog, *Load polygons as*:
