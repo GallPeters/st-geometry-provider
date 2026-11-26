@@ -192,11 +192,36 @@ class FakeConn(B._ConnBase):
             rows = rows[:int(re.search(r"FETCH FIRST (\d+)", u).group(1))]
         return FakeRows([], [tuple(self._val(c, r) for c in cols) for r in rows])
 
+    def _case(self, c, r):
+        body = c[len("CASE "):-len(" END")]
+        other = None
+        if " ELSE " in body:
+            body, other = body.rsplit(" ELSE ", 1)
+        for clause in body.split("WHEN ")[1:]:
+            cond, val = clause.rsplit(" THEN ", 1)
+            if self._cond(cond.strip(), r):
+                return self._v(val.strip(), r)
+        return self._v(other.strip(), r) if other else None
+
+    def _cond(self, cond, r):
+        if "maxx - " in cond:
+            tol = float(re.search(r"< ([0-9.eE+-]+)", cond).group(1))
+            return r["maxx"] - r["minx"] < tol and r["maxy"] - r["miny"] < tol
+        ents = [int(e) for e in re.search(r"IN \(([0-9,]+)\)", cond).group(1).split(",")]
+        return r["entity"] in ents
+
+    def _v(self, val, r):
+        if val == "NULL":
+            return None
+        m = re.match(r'FLOOR\(t\."SHAPE"\.(minx|miny) / ([0-9.eE+-]+)\)', val)
+        if m:
+            return math.floor(r[m.group(1)] / float(m.group(2)))
+        return self._val(val, r)
+
     def _val(self, c, r):
         cu = c.upper()
         if cu.startswith("CASE WHEN"):
-            ents = [int(e) for e in re.search(r"IN \(([0-9,]+)\)", cu).group(1).split(",")]
-            return None if r["entity"] in ents else r["wkb"]
+            return self._case(c, r)
         if "ST_ASBINARY" in cu:
             return r["wkb"]
         for k in ("entity", "numpts", "area", "points"):
@@ -207,9 +232,19 @@ class FakeConn(B._ConnBase):
 
     def _filter(self, s, p):
         rows = ROWS
-        if "st_envintersects" in s or ".minx <= :x2" in s:
+        s = s[s.upper().index(" FROM "):] if " FROM " in s.upper() else s      # WHERE part only
+        m = re.search(r"st_envintersects\(t\.\"SHAPE\", :(\w+), :(\w+), :(\w+), :(\w+)\)", s)
+        if m:
+            x1, y1, x2, y2 = (p[g] for g in m.groups())
+            rows = [r for r in rows if r["minx"] <= x2 and r["maxx"] >= x1 and r["miny"] <= y2 and r["maxy"] >= y1]
+        elif ".minx <= :x2" in s:
             x1, y1, x2, y2 = p["x1"], p["y1"], p["x2"], p["y2"]
             rows = [r for r in rows if r["minx"] <= x2 and r["maxx"] >= x1 and r["miny"] <= y2 and r["maxy"] >= y1]
+        m = re.search(r'GREATEST\(t\."SHAPE"\.(minx|miny), :(\w+)\) >= :t1 AND .*? (<=|<) :t2', s)
+        if m:
+            ax, b, op = m.group(1), p[m.group(2)], m.group(3)
+            t1, t2 = p["t1"], p["t2"]
+            rows = [r for r in rows if t1 <= max(r[ax], b) and (max(r[ax], b) <= t2 if op == "<=" else max(r[ax], b) < t2)]
         tol = None
         m = re.search(r'maxx - t\."SHAPE"\.minx (>=|<) ([0-9.eE+-]+)', s)
         if m:
@@ -380,7 +415,10 @@ try:
     ends = [l for l in LOG if "[timing]" in l and " rows=" in l]
     check("render full extent", not img.isNull(), "%.2fs" % dt)
     check("overview activated in real render", any("overview=1px" in l for l in starts), starts[0] if starts else "no timing line")
-    check("overview merged pixel rows", any("GROUP BY" in q for q in SQL_LOG))
+    ends_ov = [l for l in LOG if "[timing]" in l and " rows=" in l]
+    check("overview: one statement, sub-pixel rows merged on the client",
+          len(SQL_LOG) == 1 and "FLOOR(" in SQL_LOG[0] and any(" cells=" in l and " cells=0 " not in l for l in ends_ov),
+          ends_ov[-1] if ends_ov else "")
     if ends:
         print("   ", ends[-1])
     # non-black pixels sanity
@@ -397,7 +435,7 @@ try:
     check("non-render rect request is exact (no pixel cells)", len(fs) == N and abs(fs[0].geometry().area() - ROWS[fs[0].id()-1]["area"]) < 1e-15, str(len(fs)))
     B.set_overview(False)
     img2, dt2 = render(lyr, lyr.extent())
-    check("render with overview off", not any("GROUP BY" in q for q in SQL_LOG), "%.2fs" % dt2)
+    check("render with overview off", not any("FLOOR(" in q for q in SQL_LOG), "%.2fs" % dt2)
     B.set_overview(True)
 
     # zoomed in: index plan
@@ -409,7 +447,18 @@ try:
     # parallel sessions with partitions
     B.set_parallel_degree(2)
     img4, dt4 = render(lyr, lyr.extent())
-    check("parallel render ok", not img4.isNull() and len(SQL_LOG) >= 4, "%d statements %.2fs" % (len(SQL_LOG), dt4))
+    check("parallel render ok", not img4.isNull() and len(SQL_LOG) >= 2, "%d statements %.2fs" % (len(SQL_LOG), dt4))
+    # index plan + parallel: the view is cut into strips; same features as one session, no duplicates
+    zr = QgsRectangle(ROWS[0]["minx"] - 0.02, ROWS[0]["miny"] - 0.02, ROWS[0]["minx"] + 0.02, ROWS[0]["miny"] + 0.02)
+    SQL_LOG.clear()
+    ids_par = [f.id() for f in lyr.getFeatures(QgsFeatureRequest().setFilterRect(zr))]
+    strips = [q for q in SQL_LOG if "GREATEST(" in q]
+    B.set_parallel_degree(1)
+    ids_one = [f.id() for f in lyr.getFeatures(QgsFeatureRequest().setFilterRect(zr))]
+    check("parallel strips: index work split (%d strip statements)" % len(strips), len(strips) == 2)
+    check("parallel strips: identical features, no duplicates", sorted(ids_par) == sorted(ids_one) and len(set(ids_par)) == len(ids_par),
+          "%d vs %d" % (len(ids_par), len(ids_one)))
+    B.set_parallel_degree(2)
     fs = list(lyr.getFeatures())
     check("parallel full read count", len(fs) == N, str(len(fs)))
     B.set_parallel_degree(1)

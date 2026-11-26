@@ -64,7 +64,7 @@ def set_backend_pref(value):
 
 
 # fastest configuration (also the defaults) - see reset_fast_defaults()
-FAST = {"backend": "auto", "parallel": 8, "index_max_rows": 50000, "decoder": "auto",
+FAST = {"backend": "auto", "parallel": 4, "index_max_rows": 50000, "decoder": "auto",
         "overview": True, "overview_px": 1.0, "curves": "off", "timing": False}
 
 SETTINGS_TIMING = "stgeometry/timing"

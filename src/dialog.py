@@ -195,6 +195,9 @@ class AddLayerDialog(QDialog):
         lay.addWidget(self.status)
 
         btns = QHBoxLayout()
+        self.btn_tune = QPushButton("Tune on current map view")
+        self.btn_tune.setToolTip("Renders the current map view with the first selected table using each combination "
+                                 "of parallel sessions (1/4/8) and fast overview (off/on), and applies the fastest.")
         self.btn_fast = QPushButton("Fastest settings")
         self.btn_fast.setToolTip("Apply the fastest load/render configuration to every option in this dialog")
         self.btn_diag = QPushButton("Diagnostics (first selected)")
@@ -202,6 +205,7 @@ class AddLayerDialog(QDialog):
         self.btn_add = QPushButton("Add selected layer(s)")
         self.btn_close = QPushButton("Close")
         btns.addWidget(self.btn_fast)
+        btns.addWidget(self.btn_tune)
         btns.addWidget(self.btn_diag)
         btns.addWidget(self.btn_bench)
         btns.addStretch(1)
@@ -213,6 +217,7 @@ class AddLayerDialog(QDialog):
         self.btn_add.clicked.connect(self.add_layers)
         self.btn_diag.clicked.connect(self.diagnostics)
         self.btn_fast.clicked.connect(self.apply_fastest)
+        self.btn_tune.clicked.connect(self.tune)
         self.btn_bench.clicked.connect(self.benchmark)
         self.btn_close.clicked.connect(self.reject)
         self.search.textChanged.connect(self.apply_filter)
@@ -235,6 +240,61 @@ class AddLayerDialog(QDialog):
                                 "or create one in Browser > Oracle > New Connection.")
 
     # ------------------------------------------------------------------
+    def tune(self):
+        """Measure real renders of the current map view and apply the fastest parallel / overview combination."""
+        items = self._selected()
+        if not items or self.iface is None:
+            self.status.setText("Select the table you are looking at on the map, then press Tune.")
+            return
+        from time import perf_counter as pc
+        from qgis.core import QgsMapSettings, QgsMapRendererSequentialJob
+        it = items[0]
+        out = []
+        best = None
+        old = (B.parallel_degree(), B.overview_enabled())
+        try:
+            with _Busy():
+                layer = self._make_layer(it)
+                if not layer.isValid():
+                    raise RuntimeError(LAST_ERRORS.get("%s.%s" % (it.text(0), it.text(1)), "layer invalid"))
+                ms0 = self.iface.mapCanvas().mapSettings()
+
+                def render():
+                    ms = QgsMapSettings(ms0)
+                    ms.setLayers([layer])
+                    job = QgsMapRendererSequentialJob(ms)
+                    t = pc()
+                    job.start()
+                    job.waitForFinished()
+                    return pc() - t
+
+                render()                                   # warm-up: connections, Oracle cache
+                for par in (1, 4, 8):
+                    for ov in (False, True):
+                        B.set_parallel_degree(par)
+                        B.set_overview(ov)
+                        dt = min(render(), render())       # best of two
+                        out.append("parallel %-2d overview %-3s : %.2fs" % (par, "on" if ov else "off", dt))
+                        if best is None or dt < best[0]:
+                            best = (dt, par, ov)
+                        QApplication.processEvents()
+        except Exception as e:
+            out.append("ERROR: %s" % e)
+            C.log(traceback.format_exc(), "critical")
+        if best is None:
+            B.set_parallel_degree(old[0])
+            B.set_overview(old[1])
+        else:
+            B.set_parallel_degree(best[1])
+            B.set_overview(best[2])
+            self.parallel.setValue(best[1])
+            self.chk_ov.setChecked(best[2])
+            out.append("")
+            out.append("APPLIED: parallel %d, overview %s (%.2fs)" % (best[1], "on" if best[2] else "off", best[0]))
+        text = "\n".join(out)
+        C.log("Tune %s.%s\n%s" % (it.text(0), it.text(1), text))
+        show_text(self, "ST Geometry Provider - tune", text)
+
     def apply_fastest(self):
         """Fastest configuration: saved settings + the per-layer options of this dialog."""
         B.reset_fast_defaults()

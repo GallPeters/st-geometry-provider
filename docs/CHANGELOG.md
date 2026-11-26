@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3
+
+- **Parallel sessions no longer repeat index work.** With the ST spatial index, the view is cut into strips: each session searches only its own strip, and each feature belongs to exactly one strip. Previously, `MOD(OBJECTID, N)` repeated the full index search in every session.
+- **Fast overview is a single query.** Sub-cell features return no geometry columns (no blob, no Esri conversion) and are merged per cell and style value on the client. Previously, two queries ran the spatial filter twice.
+- **New *Tune on current map view* button.** It measures real renders of the current view with parallel 1/4/8 × overview off/on, and applies the fastest.
+- **Default parallel sessions: 4** (was 8). Use *Tune* to find the best value for your database.
+- New tests: parallel strips return identical features with no duplicates; tune and fastest-settings buttons.
+
 ## 1.2
 
 - **Fastest settings by default:**

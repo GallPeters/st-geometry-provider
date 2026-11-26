@@ -280,7 +280,8 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
         self._n_cells = 0
         self._ov = False
         self._cell_len = -1
-        self._part_conds = [None]
+        self._view_cond = None
+        self._seen = None
         self._timing = source.timing
         self._t0 = None
         self._t_db = 0.0
@@ -333,18 +334,53 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
             self._engine.prepareGeometry()
             self._rect_geom = rg
 
+        # ---- fast overview (map rendering only): QGIS passes the pixel size as simplification
+        # tolerance. Features whose stored envelope is smaller than the cell size get NO geometry
+        # columns (no blob, no Esri conversion) - only their cell; they are merged per cell and
+        # style value on the client. One query, so the spatial filter runs once.
+        self._ov = False
+        self._tol = 0.0
+        try:
+            sm = req.simplifyMethod()
+            if (s.overview and self._want_geom and not self._exact and self._dist_geom is None
+                    and C.SIMPLIFY_NONE is not None and sm.methodType() != C.SIMPLIFY_NONE
+                    and sm.tolerance() > 0 and ftype in (C.FILTER_NONE, C.FILTER_EXPR)
+                    and not (fe is not None and fe.needsGeometry())):
+                # QGIS tolerance = simplification threshold (px) x map units per pixel
+                px = float(sm.tolerance()) / (float(sm.threshold()) if sm.threshold() > 0 else 1.0)
+                self._ov = True
+                self._tol = px * s.overview_px
+                self._plan_info += " overview=%.3gpx cell=%.3g" % (s.overview_px, self._tol)
+        except Exception as e:
+            C.log("overview mode not available: %s" % e, "info")
+
+        g = s.geom_sql
+        if self._ov:
+            tol = "%r" % self._tol
+            small = "%s.maxx - %s.minx < %s AND %s.maxy - %s.miny < %s" % (g, g, tol, g, g, tol)
+
+            def W(e):                                          # no blob / conversion for sub-cell rows
+                return "CASE WHEN %s THEN NULL ELSE %s END" % (small, e)
+        else:
+            def W(e):
+                return e
         sel = [s.key_sql] + [s.cols[i].sql for i in idx]
         if self._need_geom:
             if s.dec is not None:
-                g = s.geom_sql
-                sel += ["%s.entity" % g, "%s.numpts" % g, "%s.area" % g, "%s.points" % g,
-                        "CASE WHEN %s.entity IN (%s) THEN NULL ELSE sde.st_asbinary(%s) END"
-                        % (g, ",".join(str(e) for e in s.dec.entities), g)]
+                sel += ["%s.entity" % g, "%s.numpts" % g, "%s.area" % g, W("%s.points" % g),
+                        ("CASE WHEN %s THEN NULL WHEN %s.entity IN (%s) THEN NULL ELSE sde.st_asbinary(%s) END"
+                         % (small, g, ",".join(str(e) for e in s.dec.entities), g)) if self._ov else
+                        ("CASE WHEN %s.entity IN (%s) THEN NULL ELSE sde.st_asbinary(%s) END"
+                         % (g, ",".join(str(e) for e in s.dec.entities), g))]
             else:
-                sel.append("sde.st_asbinary(%s)" % s.geom_sql)
+                sel.append(W("sde.st_asbinary(%s)" % g))
         self._has_cad = bool(self._need_geom and s.cad_sql)
         if self._has_cad:
-            sel.append(s.cad_sql)
+            sel.append(W(s.cad_sql))
+        if self._ov:                                           # last two columns: cell of sub-cell rows
+            sel += ["CASE WHEN %s THEN FLOOR(%s.minx / %s) END" % (small, g, tol),
+                    "CASE WHEN %s THEN FLOOR(%s.miny / %s) END" % (small, g, tol)]
+            self._seen = set()
         where, params = [], {}
         if s.subset:
             where.append("(%s)" % s.subset)
@@ -370,7 +406,8 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                     use_index = frac <= 0.25
                     self._plan_info += " view=%.3f" % frac
             if use_index:
-                where.append("sde.st_envintersects(%s, :x1, :y1, :x2, :y2) = 1" % s.geom_sql)
+                self._view_cond = "sde.st_envintersects(%s, :x1, :y1, :x2, :y2) = 1" % s.geom_sql
+                where.append(self._view_cond)
                 self._spatial_used = "index"
             else:
                 g = s.geom_sql
@@ -409,25 +446,6 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
             w = where + ([extra] if extra else [])
             return base_sql + (" WHERE " + " AND ".join(w) if w else "")
 
-        # ---- fast overview (map rendering only): QGIS passes the pixel size as simplification
-        # tolerance. Features whose stored envelope is smaller than one pixel are drawn as that
-        # pixel, merged in Oracle to one row per pixel and style value - no geometry fetched.
-        self._ov = False
-        self._tol = 0.0
-        try:
-            sm = req.simplifyMethod()
-            if (s.overview and self._want_geom and not self._exact and self._dist_geom is None
-                    and C.SIMPLIFY_NONE is not None and sm.methodType() != C.SIMPLIFY_NONE
-                    and sm.tolerance() > 0 and ftype in (C.FILTER_NONE, C.FILTER_EXPR)
-                    and not (fe is not None and fe.needsGeometry())):
-                # QGIS tolerance = simplification threshold (px) x map units per pixel
-                px = float(sm.tolerance()) / (float(sm.threshold()) if sm.threshold() > 0 else 1.0)
-                self._ov = True
-                self._tol = px * s.overview_px
-                self._plan_info += " overview=%.3gpx cell=%.3g" % (s.overview_px, self._tol)
-        except Exception as e:
-            C.log("overview mode not available: %s" % e, "info")
-
         lim = req.limit()
         try:
             has_order = bool(req.orderBy().list())
@@ -442,19 +460,32 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
             sql += " FETCH FIRST %d ROWS ONLY" % int(lim)
         self._sql, self._params = sql, params
 
-        # ---- parallel sessions: big geometry reads (map rendering) are split into N
-        # partitions fetched concurrently, so Oracle runs the st_asbinary conversions
-        # (Esri extproc) and the network transfer in parallel.
+        # ---- parallel sessions: big reads are split into N parts fetched concurrently.
+        #  index plan : the VIEW is cut into N strips; each session searches the ST index only in
+        #               its strip, and each feature belongs to exactly one strip (by its envelope
+        #               corner clipped to the view) -> index work is divided, never repeated
+        #  scan / none: OBJECTID ranges -> each session reads only its own part of the table
         self._parts = [(sql, params)]
         n = s.parallel
         if (n > 1 and self._want_geom and not self._exact and self._dist_geom is None and not push_limit
-                and ftype in (C.FILTER_NONE, C.FILTER_EXPR) and s.key_range is not None):
+                and ftype in (C.FILTER_NONE, C.FILTER_EXPR)):
             if self._spatial_used == "index":
-                # spatial index drives the query -> balance rows with MOD on the key
-                self._part_conds = ["MOD(%s, %d) = %d" % (s.key_sql, n, i) for i in range(n)]
-                self._parts = [(make_sql(c), params) for c in self._part_conds]
-            else:
-                # plain scan / no spatial condition -> key ranges, so each session reads only its own part
+                x1, y1, x2, y2 = params["x1"], params["y1"], params["x2"], params["y2"]
+                vertical = (x2 - x1) >= (y2 - y1)
+                lo, hi = (x1, x2) if vertical else (y1, y2)
+                ax, a1, a2 = ("minx", ":x1", ":tx") if vertical else ("miny", ":y1", ":ty")
+                tile_idx = ("sde.st_envintersects(%s, :t1, :y1, :t2, :y2) = 1" if vertical else
+                            "sde.st_envintersects(%s, :x1, :t1, :x2, :t2) = 1") % g
+                parts = []
+                for k in range(n):
+                    t1 = lo + (hi - lo) * k / n
+                    t2 = hi if k == n - 1 else lo + (hi - lo) * (k + 1) / n
+                    corner = "GREATEST(%s.%s, %s)" % (g, ax, a1)
+                    own = "%s >= :t1 AND %s %s :t2" % (corner, corner, "<=" if k == n - 1 else "<")
+                    w = [tile_idx if c == self._view_cond else c for c in where] + [own]
+                    parts.append((base_sql + " WHERE " + " AND ".join(w), dict(params, t1=t1, t2=t2)))
+                self._parts = parts
+            elif s.key_range is not None:
                 lo, hi = s.key_range
                 if hi - lo >= n * 1000:
                     step = (hi - lo + 1) / float(n)
@@ -462,39 +493,13 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                     conds = ["%s < %d" % (s.key_sql, b[0])]
                     conds += ["%s >= %d AND %s < %d" % (s.key_sql, b[k - 1], s.key_sql, b[k]) for k in range(1, n - 1)]
                     conds.append("%s >= %d" % (s.key_sql, b[-1]))
-                    self._part_conds = ["(%s)" % c for c in conds]
                     self._parts = [(make_sql("(%s)" % c), params) for c in conds]
-        part_conds = [None]
-        if len(self._parts) > 1:
-            part_conds = self._part_conds
-
-        if self._ov:
-            g = s.geom_sql
-            tol = "%r" % self._tol                     # literal: binds inside GROUP BY raise ORA-00979
-            big = "(%s.maxx - %s.minx >= %s OR %s.maxy - %s.miny >= %s)" % (g, g, tol, g, g, tol)
-            small = "%s.maxx - %s.minx < %s AND %s.maxy - %s.miny < %s" % (g, g, tol, g, g, tol)
-            cx, cy = "FLOOR(%s.minx / %s)" % (g, tol), "FLOOR(%s.miny / %s)" % (g, tol)
-            attr_sql = [s.cols[i].sql for i in idx]
-            groupable = not any(s.cols[i].lob for i in idx)
-
-            def small_sql(extra):
-                w = where + [small] + ([extra] if extra else [])
-                if groupable:
-                    return "SELECT %s FROM %s t WHERE %s GROUP BY %s" % (
-                        ", ".join(["MIN(%s)" % s.key_sql] + attr_sql + [cx, cy, "-1"]), s.relation,
-                        " AND ".join(w), ", ".join([cx, cy] + attr_sql))
-                return "SELECT %s FROM %s t WHERE %s" % (
-                    ", ".join([s.key_sql] + attr_sql + [cx, cy, "-1"]), s.relation, " AND ".join(w))
-
-            big_parts = [(make_sql(" AND ".join(x for x in (c, big) if x)), params) for c in part_conds]
-            small_parts = [(small_sql(c), params) for c in part_conds]
-            self._parts = big_parts + small_parts
-            self._cell_len = 1 + len(idx) + 3          # row length of a merged pixel row (cx, cy, marker)
 
         # ---- precomputed attribute placement (hot loop helpers)
         self._all_attrs = idx == list(range(nf))
         self._conv_pos = [(1 + j, i) for j, i in enumerate(idx) if s.cols[i].kind == "datetime"]
         self._pairs = [(1 + j, i) for j, i in enumerate(idx)]
+        self._na1 = 1 + len(idx)                     # end of the attribute columns in a row
         self._geom_ok_type = s.wkb
         # batch decoding only when the geometry columns (entity, numpts, area, points, wkb) are selected
         self._batch_dec = bool(self._need_geom and s.dec is not None and getattr(s.dec, "batch_capable", False))
@@ -516,7 +521,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
             self._rows = ParallelRows(self._s.backend, self._parts)
         else:
             self._conn = self._s.backend.acquire()
-            if self._ov:
+            if len(self._parts) > 1:
                 self._rows = _chain(self._conn, self._parts)
             else:
                 self._rows = self._conn.query(self._sql, self._params)
@@ -534,11 +539,13 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
     def _predecode(self, batch):
         """Batch-decode the POINTS blobs of rows that need the local decoder (numpy)."""
         cad = self._has_cad
-        cl = self._cell_len if self._ov else -1
+        ov = self._ov
         idx, ents, npts, blobs = [], [], [], []
         for j, row in enumerate(batch):
-            if len(row) == cl:
-                continue
+            if ov:
+                if row[-2] is not None:
+                    continue                       # sub-cell row: no geometry
+                row = row[:-2]
             if cad:
                 if row[-1] is not None:
                     continue                       # true curve row
@@ -661,10 +668,20 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                     continue
                 geom = None
                 typed = False                                  # geometry already in the layer type?
-                if self._ov and len(row) == self._cell_len:
-                    geom = self._cell_geom(row[-3], row[-2])
-                    self._n_cells += 1
-                elif self._need_geom:
+                cell = False
+                if self._ov:
+                    cx = row[-2]
+                    if cx is not None:
+                        key = (cx, row[-1]) + row[1:self._na1]
+                        if key in self._seen:
+                            continue                           # same cell + same style values: drawn already
+                        self._seen.add(key)
+                        geom = self._cell_geom(cx, row[-1])
+                        self._n_cells += 1
+                        cell = True
+                    else:
+                        row = row[:-2]
+                if not cell and self._need_geom:
                     if self._has_cad:
                         cad = row[-1]
                         row = row[:-1]

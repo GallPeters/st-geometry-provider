@@ -1,6 +1,6 @@
 # ST Geometry Provider for QGIS: what it does and how it works
 
-Version 1.2 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
+Version 1.3 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
 
 ---
 
@@ -104,7 +104,7 @@ WHERE  sde.st_envintersects(t."SHAPE", :xmin, :ymin, :xmax, :ymax) = 1   -- ST s
 
 - If the visible extent contains the whole layer, the spatial condition is left out, so a plain scan is used.
 - Rows arrive in batches of 1000. Each WKB becomes a `QgsGeometry`, and the feature goes to the QGIS renderer.
-- With **parallel sessions** (default 8; 1–16 in the dialog), a big read is split into N parts that run at the same time on N Oracle sessions (§8).
+- With **parallel sessions** (default 4; 1–16 in the dialog), a big read is split into N parts that run at the same time on N Oracle sessions (§8).
 
 ### 4.3 Attribute table, Identify, selection
 
@@ -191,12 +191,12 @@ Early measurements with the Qt OCI driver showed that reading the raw LOB, `st_a
 1. **LOBs fetched inline.** The python-oracledb driver is told to return BLOB/CLOB values as plain bytes/strings inside each batch, instead of LOB handles that each need an extra round trip. This was the main bottleneck.
 2. **Batches of 1000 rows** (array size + prefetch) per network round trip.
 3. **ST spatial index** for the map extent (`sde.st_envintersects`); skipped when the whole layer is visible.
-4. **Parallel sessions** (default 8). A big map read is split into N partitions fetched concurrently, each on its own Oracle session, and therefore its own Esri extproc process.
-   - With a spatial filter, rows are split by `MOD(OBJECTID, N)`.
-   - Without one (whole layer), they're split by OBJECTID ranges, so each session scans only its own part of the key index.
+4. **Parallel sessions** (default 4). A big map read is split into N parts fetched concurrently, each on its own Oracle session.
+   - With the spatial index, the **view is cut into N strips**. Each session searches the index only inside its strip, and each feature belongs to exactly one strip: the one containing its envelope corner, clipped to the view. The index work is **divided** between the sessions, never repeated.
+   - Without the index (plain scan or whole layer), rows are split by OBJECTID ranges, so each session reads only its own part of the table.
    - The first and last ranges are open-ended, so rows added later are never missed.
 5. **Pipelining.** Background threads fetch the next batches while QGIS builds features from the current one. A bounded queue keeps memory constant. Cancelling a redraw stops the threads.
-6. **Connection pool** (up to 48 sessions, kept open), so redraws don't reconnect.
+6. **Connection pool** (up to 64 sessions, kept open), so redraws don't reconnect.
 7. **Only the needed columns.** Rendering asks only for the columns the style and labels use, and the attribute table asks for no geometry.
 8. **Bind variables** for the extent and filter values, so Oracle reuses the parsed statement on every pan.
 9. **Row limits pushed to Oracle** (`FETCH FIRST n ROWS ONLY`), only when that's provably exact.
@@ -361,14 +361,14 @@ Measurements showed that the **per-row conversion on the server** (`sde.st_asbin
 
 **Goal:** one live layer that stays fast when millions of features are in view, with no second layer and no cache.
 
-**How:** when QGIS draws a layer, its request carries the **size of one screen pixel** (the simplification tolerance; on by default, 1 pixel). The plugin then splits the read into two queries:
+**How:** when QGIS draws a layer, its request carries the **size of one screen pixel** (the simplification tolerance; on by default, 1 pixel). The plugin keeps **one query** (the spatial filter runs once), but the geometry columns depend on each feature's stored envelope:
 
-| Query | Rows | What is fetched |
-|---|---|---|
-| **Large features** (envelope ≥ 1 pixel) | as usual | full geometry (local decoder / Esri) |
-| **Sub-pixel features** (envelope < 1 pixel) | **merged in Oracle**: `GROUP BY FLOOR(minx/pixel), FLOOR(miny/pixel), <attributes the style uses>` | only the id, the style attributes and the pixel cell. **No geometry bytes, no decoding.** |
+| Feature | What Oracle returns |
+|---|---|
+| **Large** (envelope ≥ cell) | full geometry (local decoder / Esri) |
+| **Sub-cell** (envelope < cell) | only the id, the style attributes and its cell (`FLOOR(minx/cell), FLOOR(miny/cell)`). **No geometry bytes, no Esri conversion, no decoding.** |
 
-Each merged row is drawn as **one pixel-sized square** (or a point/short line for point and line layers). A sub-pixel feature can't look different from a pixel anyway, so the map looks the same. The rows returned depend on **screen size**, not table size.
+On your PC, sub-cell features with the **same cell and the same style values are merged**, and only the first one is drawn. Each merged cell is drawn as **one cell-sized square** (or a point/short line for point and line layers). A sub-pixel feature can't look different from a pixel anyway, so the map looks the same. The rows returned depend on **screen size**, not table size.
 
 **Exact everywhere else.** Identify, selection, attribute table, export, processing and labels all use requests without the pixel information. They always get real geometries and real feature counts.
 
@@ -478,7 +478,7 @@ All defaults are chosen for the fastest loading and drawing. The dialog's **Fast
 |---|---|---|
 | Driver | Auto (python-oracledb) | Bulk fetch with inline LOBs |
 | Geometry decoding | Local decoder where verified | No per-row conversion on the server |
-| Parallel sessions per layer | **8** | Large reads split across sessions. More sessions add database load for little extra gain once decoding is local. |
+| Parallel sessions per layer | **4** | Large reads split into view strips (index plan) or OBJECTID ranges (scan). Use *Tune on current map view* to find the best value for your database. |
 | Use plain scan above | 50,000 estimated rows | Index for small views, scan for huge ones |
 | Fast overview | **On**, 1 px | No geometry fetched for sub-pixel features (map drawing only) |
 | Arcs (true curves) | Off | Curves cost extra parsing and drawing |
@@ -489,4 +489,22 @@ All defaults are chosen for the fastest loading and drawing. The dialog's **Fast
 | Timing log | Off | |
 | Connection pool | up to 64 sessions | Room for several layers drawing in parallel |
 
-> **Note for the DBA:** with these defaults, drawing one large layer can use up to 8 sessions. If that's too many for a shared database, lower *Parallel sessions* (1 = a single session).
+> **Note for the DBA:** with these defaults, drawing one large layer can use up to 4 sessions. If that's too many for a shared database, lower *Parallel sessions* (1 = a single session).
+
+
+---
+
+## 21. Tuning on your own database
+
+The ideal settings depend on your Oracle server: CPU, load, network and index behaviour. A plugin can't know these in advance, so the dialog can **measure** them.
+
+**Tune on current map view:** select the table you're looking at and press the button. The plugin renders the current map view with each combination of
+
+- parallel sessions **1, 4, 8**, and
+- fast overview **off / on**
+
+through QGIS's real renderer, after a warm-up render and taking the best of two renders per combination. It then **applies the fastest combination** and shows the timings. Run it on a typical view, or on the view that matters most to you (e.g. a dense, zoomed-out one).
+
+**Why the strategy changed in 1.3.** Earlier versions split parallel index reads with `MOD(OBJECTID, N)`, which repeated the full ST index search in every session. The fast overview also used two queries, which ran the spatial filter twice. Both multiplied work on the database server. In 1.3:
+- parallel index reads are split into **view strips**, so the index work is divided between sessions;
+- the overview is a **single query**.
