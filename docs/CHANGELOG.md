@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5
+
+- **Fix: features in the wrong place (e.g. "in the sea") when reading through the versioned view.** Rows from ArcGIS's edit tables could be stored in a way the local decoder (verified on the base table only) decoded wrongly. Every decoded geometry must now reproduce Esri's stored envelope (`MINX…MAXY`); otherwise that row is converted by Esri on the server. This protects plain tables too. Cost: about 0.3 µs per feature.
+- **Much faster versioned view (`_EVW`): hybrid read.** Never-edited features (not in the `A<n>`/`D<n>` delta tables) are read from the base table, with the ST index, parallel strips and the local decoder. Only edited features are read through `_EVW`. The result is identical to reading `_EVW`; feature counts use the same split.
+- **Tests:** new `test_evw.py` (edits, inserts and deletes; parallel 1 and 4; wrongly-encoded edited rows; a corrupt base row). Without the envelope check it reproduces the problem: 25 buildings misplaced.
+
 ## 1.4
 
 - **Fix: parallel sessions on zoomed-in views.** With *Parallel sessions per layer* above 1, zoomed-in views (spatial index plan) showed no features. Each parallel strip query was sent with a view coordinate it didn't use, and python-oracledb rejects unused bind values (DPY-4008). The database layer now sends only the bind values that appear in each statement.

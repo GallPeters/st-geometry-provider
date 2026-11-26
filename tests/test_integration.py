@@ -99,8 +99,10 @@ for oid in range(1, N + 1):
     # coordinates as Esri would round them to the grid
     gr = QgsGeometry.fromWkt(g.asWkt(17))
     ROWS.append(dict(oid=oid, name="bldg %d" % oid, height=float(oid % 30), created=None,
-                     minx=x, miny=y, maxx=x + s, maxy=y + s, entity=8, numpts=len(pts),
+                     minx=gr.boundingBox().xMinimum(), miny=gr.boundingBox().yMinimum(), maxx=gr.boundingBox().xMaximum(), maxy=gr.boundingBox().yMaximum(), entity=8, numpts=len(pts),
                      area=abs(g.area()), points=blob(pts, [5.0] * len(pts)), wkb=bytes(gr.asWkb())))
+EVW_ROWS = ROWS          # tests of versioned data replace these (see test_evw.py)
+CHANGED = set()
 EXT = (min(r["minx"] for r in ROWS), min(r["miny"] for r in ROWS), max(r["maxx"] for r in ROWS), max(r["maxy"] for r in ROWS))
 SQL_LOG = []
 
@@ -147,8 +149,16 @@ class FakeConn(B._ConnBase):
             return FakeRows(["COLUMN_NAME", "DATA_TYPE", "DATA_PRECISION", "DATA_SCALE"], [
                 ("OBJECTID", "NUMBER", 38, 0), ("NAME", "NVARCHAR2", None, None),
                 ("HEIGHT", "NUMBER", 10, 2), ("CREATED", "DATE", None, None), ("SHAPE", "ST_GEOMETRY", None, None)])
+        if "SDE.TABLE_REGISTRY" in u and "REGISTRATION_ID" in u:
+            return FakeRows(["REGISTRATION_ID"], [(77,)])
         if "SDE.TABLE_REGISTRY" in u:
             return FakeRows(["ROWID_COLUMN"], [("OBJECTID",)])
+        if "FROM ALL_VIEWS" in u:
+            return FakeRows(["C"], [(1,)])
+        if "FROM ALL_TABLES" in u and "TABLE_NAME IN" in u:
+            return FakeRows(["TABLE_NAME"], [("A77",), ("D77",)])
+        if u.startswith("SELECT (SELECT COUNT(*)"):
+            return FakeRows(["C"], [(len(EVW_ROWS),)])
         if "FROM DUAL" in u and "MIN(" in u:
             return FakeRows(["A", "B"], [(1, N)])
         if "SDE.ST_GEOMETRY_COLUMNS" in u:
@@ -228,15 +238,19 @@ class FakeConn(B._ConnBase):
             return self._case(c, r)
         if "ST_ASBINARY" in cu:
             return r["wkb"]
-        for k in ("entity", "numpts", "area", "points"):
+        for k in ("entity", "numpts", "area", "points", "minx", "miny", "maxx", "maxy"):
             if cu.endswith(".%s" % k.upper()):
                 return r[k]
         name = re.search(r'"([A-Z]+)"$', c).group(1)
         return {"OBJECTID": r["oid"], "NAME": r["name"], "HEIGHT": r["height"], "CREATED": r["created"]}[name]
 
     def _filter(self, s, p):
-        rows = ROWS
         s = s[s.upper().index(" FROM "):] if " FROM " in s.upper() else s      # WHERE part only
+        rows = EVW_ROWS if s.split(" t", 1)[0].endswith('"BLDG_EVW"') else ROWS
+        if '"OBJECTID" NOT IN (SELECT' in s:
+            rows = [r for r in rows if r["oid"] not in CHANGED]
+        elif '"OBJECTID" IN (SELECT' in s:
+            rows = [r for r in rows if r["oid"] in CHANGED]
         m = re.search(r"st_envintersects\(t\.\"SHAPE\", :(\w+), :(\w+), :(\w+), :(\w+)\)", s)
         if m:
             x1, y1, x2, y2 = (p[g] for g in m.groups())

@@ -209,6 +209,8 @@ class StFeatureSource(QgsAbstractFeatureSource):
         super().__init__()
         self.backend = p._backend
         self.relation = p._relation
+        self.changed_sql = p._changed_sql            # versioned view: hybrid read
+        self.base_rel = p._base_rel
         self.geom_sql = "t." + qi(p._geom)
         self.key_sql = "t." + qi(p._key)
         self.cols = list(p._cols)
@@ -367,7 +369,8 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
         sel = [s.key_sql] + [s.cols[i].sql for i in idx]
         if self._need_geom:
             if s.dec is not None:
-                sel += ["%s.entity" % g, "%s.numpts" % g, "%s.area" % g, W("%s.points" % g),
+                sel += ["%s.entity" % g, "%s.numpts" % g, "%s.area" % g,
+                        "%s.minx" % g, "%s.miny" % g, "%s.maxx" % g, "%s.maxy" % g, W("%s.points" % g),
                         ("CASE WHEN %s THEN NULL WHEN %s.entity IN (%s) THEN NULL ELSE sde.st_asbinary(%s) END"
                          % (small, g, ",".join(str(e) for e in s.dec.entities), g)) if self._ov else
                         ("CASE WHEN %s.entity IN (%s) THEN NULL ELSE sde.st_asbinary(%s) END"
@@ -441,7 +444,13 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
         elif ftype != C.FILTER_NONE:
             exact_sql = False
 
-        base_sql = "SELECT %s FROM %s t" % (", ".join(sel), s.relation)
+        edit_where = None
+        if s.changed_sql:
+            # hybrid versioned read: unedited rows from the base table, edited rows through <TABLE>_EVW
+            edit_where = where + ["%s IN %s" % (s.key_sql, s.changed_sql)]
+            where = where + ["%s NOT IN %s" % (s.key_sql, s.changed_sql)]
+            self._plan_info += " evw=hybrid"
+        base_sql = "SELECT %s FROM %s t" % (", ".join(sel), s.base_rel if s.changed_sql else s.relation)
 
         def make_sql(extra=None):
             w = where + ([extra] if extra else [])
@@ -496,6 +505,12 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                     conds.append("%s >= %d" % (s.key_sql, b[-1]))
                     self._parts = [(make_sql("(%s)" % c), params) for c in conds]
 
+        if edit_where is not None:
+            esql = "SELECT %s FROM %s t WHERE %s" % (", ".join(sel), s.relation, " AND ".join(edit_where))
+            if push_limit:
+                esql += " FETCH FIRST %d ROWS ONLY" % int(lim)
+            self._parts = list(self._parts) + [(esql, params)]
+
         # ---- precomputed attribute placement (hot loop helpers)
         self._all_attrs = idx == list(range(nf))
         self._conv_pos = [(1 + j, i) for j, i in enumerate(idx) if s.cols[i].kind == "datetime"]
@@ -541,7 +556,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
         """Batch-decode the POINTS blobs of rows that need the local decoder (numpy)."""
         cad = self._has_cad
         ov = self._ov
-        idx, ents, npts, blobs = [], [], [], []
+        idx, ents, npts, blobs, envs = [], [], [], [], []
         for j, row in enumerate(batch):
             if ov:
                 if row[-2] is not None:
@@ -555,12 +570,13 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                 r = row
             if r[-1] is None and r[-2] is not None:
                 idx.append(j)
-                ents.append(r[-5])
-                npts.append(r[-4])
+                ents.append(r[-9])
+                npts.append(r[-8])
                 blobs.append(r[-2])
+                envs.append(r[-6:-2])
         if not idx:
             return None
-        res = self._s.dec.decode_batch(ents, npts, blobs)
+        res = self._s.dec.decode_batch(ents, npts, blobs, envs)
         pre = [None] * len(batch)
         for j, g in zip(idx, res):
             pre[j] = g
@@ -699,7 +715,7 @@ class StFeatureIterator(QgsAbstractFeatureIterator):
                     elif s.dec is None or w is not None:
                         geom = wkb_to_geometry(w)
                     elif row[-2] is not None:
-                        geom = s.dec.geometry(row[-5], row[-4], row[-3], row[-2])
+                        geom = s.dec.geometry(row[-9], row[-8], row[-7], row[-2], row[-6:-2])
                         if geom is None:          # not understood -> Esri converts this one row
                             geom = self._server_geom(fid)
                     if s.geom_as and geom is not None:
@@ -812,6 +828,8 @@ class StGeometryProvider(QgsVectorDataProvider):
         self._curve_hint = None
         self._curve_cache = None
         self._geom_as = ""
+        self._changed_sql = None
+        self._base_rel = ""
         try:
             t0 = time.time()
             self._load(uri)
@@ -930,6 +948,7 @@ class StGeometryProvider(QgsVectorDataProvider):
                                   {"o": owner, "v": table + "_EVW"})
                 if r and int(r[0]) > 0:
                     self._relation = "%s.%s" % (qi(owner), qi(table + "_EVW"))
+                    self._setup_evw_hybrid(conn, owner, table, base, key)
                 else:
                     C.log("%s: no versioned view %s_EVW, using base table" % (self._label, table), "warning")
 
@@ -1105,6 +1124,33 @@ class StGeometryProvider(QgsVectorDataProvider):
             if curves_mode() == "curves":
                 self._wkb = QgsWkbTypes.curveType(self._wkb)
         C.log("%s: true curves (%s) %s" % (self._label, cadcol, info))
+
+    def _setup_evw_hybrid(self, conn, owner, table, base, key):
+        """Fast exact read of the versioned view: features that were never edited (not in the A/D delta
+        tables) are identical in the base table and in <TABLE>_EVW, so they are read from the base table
+        (ST index, strips, local decoder); only edited features are read through <TABLE>_EVW."""
+        try:
+            r = conn.fetchone("SELECT registration_id FROM sde.table_registry WHERE owner = :o AND table_name = :t",
+                              {"o": owner, "t": table})
+            if not r or r[0] is None:
+                raise RuntimeError("not in SDE.TABLE_REGISTRY")
+            reg = int(r[0])
+            a_t, d_t = "A%d" % reg, "D%d" % reg
+            found = set(x[0] for x in conn.fetchall(
+                "SELECT table_name FROM all_tables WHERE owner = :o AND table_name IN (:a, :d)",
+                {"o": owner, "a": a_t, "d": d_t}))
+            if found != {a_t, d_t}:
+                raise RuntimeError("delta tables %s/%s not visible" % (a_t, d_t))
+            k = qi(key)
+            self._changed_sql = ("(SELECT %s FROM %s.%s WHERE %s IS NOT NULL UNION ALL "
+                                 "SELECT SDE_DELETES_ROW_ID FROM %s.%s WHERE SDE_DELETES_ROW_ID IS NOT NULL)"
+                                 % (k, qi(owner), qi(a_t), k, qi(owner), qi(d_t)))
+            self._base_rel = base
+            C.log("%s: versioned view read as hybrid (unedited rows from the base table, edited rows "
+                  "from %s_EVW; delta tables %s/%s)" % (self._label, table, a_t, d_t))
+        except Exception as e:
+            self._changed_sql = None
+            C.log("%s: %s_EVW read directly (hybrid not available: %s)" % (self._label, table, e), "info")
 
     def _srid(self, conn, owner, table, geom):
         try:
@@ -1310,7 +1356,15 @@ class StGeometryProvider(QgsVectorDataProvider):
             conn = None
             try:
                 conn = self._backend.acquire()
-                r = conn.fetchone("SELECT COUNT(*) FROM %s t%s" % (self._relation, self._where()))
+                if self._changed_sql:
+                    sub = (" AND (%s)" % self._subset) if self._subset else ""
+                    k = "t." + qi(self._key)
+                    r = conn.fetchone("SELECT (SELECT COUNT(*) FROM %s t WHERE %s NOT IN %s%s) + "
+                                      "(SELECT COUNT(*) FROM %s t WHERE %s IN %s%s) FROM dual"
+                                      % (self._base_rel, k, self._changed_sql, sub,
+                                         self._relation, k, self._changed_sql, sub))
+                else:
+                    r = conn.fetchone("SELECT COUNT(*) FROM %s t%s" % (self._relation, self._where()))
                 self._count = int(r[0])
             except Exception as e:
                 C.log("%s: feature count failed: %s" % (self._label, e), "warning")

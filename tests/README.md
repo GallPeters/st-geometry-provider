@@ -8,6 +8,7 @@ These tests run **headless inside a real QGIS** (no GUI). Oracle is simulated: a
 | `test_curves.py` | True curves from extended shape buffers: arc encodings (center and interior point), arcs on holes, the off / true-curve / segmentize modes, segmentation by angle and by distance, rendering |
 | `test_geometry_as.py` | Polygons loaded as lines (rings, holes, perimeter, identify) and as points (all inside, L-shapes moved inside, true centroid for convex shapes, Z, Force 2D), rendering with and without fast overview |
 | `test_parallel.py` | Parallel sessions 1/2/3/4/8/16 × every plan and view shape (index strips vertical/horizontal, data edge, full extent, plain scan), with expression and layer filters, plus real zoomed-in renders: exactly the expected features, no duplicates |
+| `test_evw.py` | Versioned view: hybrid read (unedited rows from the base table, edited through `_EVW`) returns exactly the EVW features with edits, inserts and deletes; wrongly-encoded edited rows and a corrupt base row are never misplaced (envelope check) |
 | `test_tune.py` | *Tune on current map view* (6 measured combinations, fastest applied) and *Fastest settings* |
 | `test_batch_decoder.py` | numpy batch decoder vs per-row decoder on random data: 2D/3D, all Z layouts, points, lines, polygons, truncated rows. Must report 0 mismatches. |
 

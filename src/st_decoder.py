@@ -208,8 +208,13 @@ class EsriDecoder(object):
             return _PACK_HDR(1, mtype, len(parts)) + b"".join(parts), True
         return None, False
 
-    def geometry(self, ent, npts, area, points):
-        """QgsGeometry, or None when this row must be converted by the server."""
+    def env_tol(self, v):
+        """Allowed difference between a decoded coordinate and Esri's stored envelope."""
+        return 16.0 * self.inv + 1e-9 * abs(v)
+
+    def geometry(self, ent, npts, area, points, env=None):
+        """QgsGeometry, or None when this row must be converted by the server.
+        env = Esri's stored envelope (minx, miny, maxx, maxy): the decoded geometry must match it."""
         if ent is None:
             return None
         w, multi_ring = self.wkb(int(ent), npts, points)
@@ -217,6 +222,11 @@ class EsriDecoder(object):
             return None
         g = QgsGeometry()
         g.fromWkb(w)                   # bytes directly: ~0.8 us faster than wrapping in QByteArray
+        if env is not None and env[0] is not None:
+            b = g.boundingBox()
+            got = (b.xMinimum(), b.yMinimum(), b.xMaximum(), b.yMaximum())
+            if any(abs(float(e) - x) > self.env_tol(x) for e, x in zip(env, got)):
+                return None            # does not match Esri's envelope -> never trust it
         if multi_ring and area is not None:
             # independent check of ring grouping against Esri's stored AREA
             a, ref = g.area(), abs(float(area))
@@ -346,7 +356,7 @@ except Exception:          # numpy missing -> per-row decoding only
     _np = None
 
 
-def _decode_batch(self, ents, npts, blobs):
+def _decode_batch(self, ents, npts, blobs, envs=None):
     """
     Decode many POINTS blobs at once with numpy (varint parsing, signs, delta sums, scaling and
     ring-closure checks are array operations). Returns a list aligned with the input: QgsGeometry,
@@ -422,6 +432,21 @@ def _decode_batch(self, ents, npts, blobs):
     accept = (((ee == ENT_POLY) & (nn >= 4) & (neq == 2) & last_eq)   # single closed ring
               | ((ee == ENT_POINT) & (nn == 1))
               | ((ee == ENT_LINE) & (nn >= 2)))
+    if envs is not None:
+        # safety net: the decoded bounding box must equal Esri's stored envelope, else per-row path
+        # (which checks again and falls back to Esri's own conversion)
+        ev = [envs[sel[v]] for v in vidx.tolist()]
+        try:
+            E = np.array(ev, dtype=float).reshape(-1, 4)          # fast path: one C conversion
+        except (TypeError, ValueError):                         # an empty (NULL) envelope value
+            E = np.array([[np.nan if c is None else float(c) for c in e] for e in ev], dtype=float).reshape(-1, 4)
+        xs = self.fx + Xa * self.inv
+        ys = self.fy + Ya * self.inv
+        got = np.column_stack((np.minimum.reduceat(xs, ptstart), np.minimum.reduceat(ys, ptstart),
+                               np.maximum.reduceat(xs, ptstart), np.maximum.reduceat(ys, ptstart)))
+        tol = 16.0 * self.inv + 1e-9 * np.abs(got)
+        env_ok = np.where(np.isnan(E), True, np.abs(E - got) <= tol).all(axis=1)
+        accept &= env_ok
     if hz:
         accept &= d == 3                            # 2D row in a Z layer: per-row path (identical output)
     a_idx = np.flatnonzero(accept)

@@ -1,6 +1,6 @@
 # ST Geometry Provider for QGIS: what it does and how it works
 
-Version 1.4 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
+Version 1.5 · read-only · QGIS 3.34 to 4.x · Oracle with Esri SDE.ST_GEOMETRY
 
 ---
 
@@ -244,6 +244,18 @@ Credentials come from the QGIS connection or authentication config. If none are 
 - By default the plugin reads the **base table**. With **traditional versioning**, edits that sit in the version delta tables (`A<n>` / `D<n>`) and haven't been compressed into the base table are **not visible** there.
 - Tick **"Read through versioned view (_EVW)"** to read `<TABLE>_EVW`, which shows the **DEFAULT** version. Other named versions aren't supported.
 
+### Fast and exact: the hybrid read
+`_EVW` is a complex view (base table, minus deletes, plus adds, across version states). Oracle can't use the ST spatial index through it efficiently, so querying it directly is slow. The plugin therefore splits each read in two:
+
+| Features | Read from | Why it's exact |
+|---|---|---|
+| **Never edited** (OBJECTID in neither delta table `A<n>` nor `D<n>`) | the **base table**, with the ST index, parallel strips and the local decoder | Without any edit, the base row *is* the DEFAULT row |
+| **Edited** (OBJECTID in `A<n>` or `D<n>`) | **`<TABLE>_EVW`** | Esri's view decides their DEFAULT state (updated, inserted or deleted) |
+
+`<n>` is the feature class's registration id in `SDE.TABLE_REGISTRY`. The edited set is re-read on every map read, so edits show up as soon as they're saved. Unless edits are never compressed, the edited share is small, and the read costs about the same as a plain table read.
+
+The log shows `versioned view read as hybrid …` when the layer loads, and the timing log shows `evw=hybrid`. If the delta tables aren't visible to your user, the plugin reads `_EVW` directly (slower, same result).
+
 ---
 
 ## 11. Limitations
@@ -338,6 +350,9 @@ Measurements showed that the **per-row conversion on the server** (`sde.st_asbin
 | Polygon rings | **No ring markers.** A ring ends where it returns to its own start point (an exact integer comparison). Rings inside an earlier ring become its holes; rings outside start a new part (MultiPolygon). |
 
 ### Safety: it never guesses silently
+
+**Envelope check on every row.** Esri stores each shape's bounding box (`MINX … MAXY`) next to its `POINTS`. Every locally decoded geometry, in batch or per row, must reproduce that box (within the coordinate grid). If it doesn't (for example an edit-table row written differently), the row is converted by Esri on the server instead. A wrongly decoded shape can therefore never be drawn in the wrong place. Cost: about 0.3 µs per feature.
+
 1. **Verification at layer load.** For each layer, 300 rows are decoded locally *and* converted by Esri (`sde.st_asbinary`), then compared vertex by vertex: same parts, same rings, same coordinates within the grid resolution. Ring orientation is ignored, because it doesn't matter to QGIS.
    - The decoder is switched on only for the shape types (entity codes) whose sample rows **all** matched.
    - The Z layout is chosen the same way. If Z can't be verified but X/Y can, the decoder is used only for layers with **Force 2D** ticked.
